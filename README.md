@@ -109,7 +109,14 @@ python sdxtg_app.py
 * *Experiment → X-ray pump · optical probe*: the X-ray TG is read by an optical probe (wavelength, incidence angle,
   sample index n, thickness, X-ray attenuation length). Transmission geometry, probe in the split plane. The probe's
   in-plane wavevector picks up ±K_x = ±2π/Λ exactly; the mismatch along the normal Δk_z = k_pz ± K_z − k_dz
-  (inside the sample) gives **η_rel = sinc²(Δk_z L / 2)**, L = min(thickness, attenuation length). The tab plots the
+  (inside the sample) sets the efficiency. The TG amplitude decays as e^(−z/L_att) (L_att = X-ray attenuation
+  length) over the thickness d, so **η_rel = |∫₀ᵈ e^(−z/L_att) e^(iΔk_z z) dz|² / |∫₀ᵈ e^(−z/L_att) dz|²**:
+  sinc²(Δk_z d/2) for a uniform slab (d ≪ L_att), a Lorentzian 1/(1 + Δk_z² L_att²) when the pump is absorbed.
+  *Use SrTiO₃, 10 µm* loads STO (n at the probe from approximate literature values; L_att from the Henke tables =
+  CXRO data, 159 nm at 532 eV, via `pip install periodictable`). With a soft X-ray pump the grating is only
+  ~160 nm deep (Klein Q ≈ 1.7 for Λ = 300 nm, 400 nm probe): the curve is a broad Lorentzian and the whole
+  −90°…90° range only reaches its central part, so phase matching is not critical. A textbook sinc² with side lobes
+  needs a deep, uniform grating (d ≲ L_att and d ≳ 10 Λ): e.g. 10 µm uniform → 5.2° FWHM, 3 µm → 17.6°. The tab plots the
   full sinc² curve against the probe angle for both diffracted orders, the Bragg angle sin φ_B = λ_probe/(2Λ), the
   angular acceptance (FWHM) and the exit angle. A diffracted probe exists only for **Λ > λ_probe / 2**, which becomes a
   feasibility condition (the SD/CCD conditions are dropped in this mode). Figure of merit:

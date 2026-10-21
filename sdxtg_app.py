@@ -212,17 +212,51 @@ with sb.expander("Grating", expanded=True):
               disabled=ss["grating_type"] != "phase")
     st.number_input("Membrane transmission", 0.0, 1.0, step=0.05, key="membrane_T")
 
+# SrTiO3 refractive index (ordinary, room temperature), approximate literature values
+STO_N = ([400, 450, 500, 589, 633, 800, 1030, 1300], [2.64, 2.53, 2.47, 2.41, 2.39, 2.34, 2.31, 2.29])
+
+
+def compute_att():
+    try:
+        ss["xray_atten_nm"] = round(sim.xray_atten_length_nm(ss["sample_formula"], ss["sample_density"],
+                                                              ss["wavelength_nm"]), 1)
+        ss["att_msg"] = (f"{ss['sample_formula']}, ρ = {ss['sample_density']} g/cm³ at "
+                         f"{1239.842 / ss['wavelength_nm']:.0f} eV: {ss['xray_atten_nm']:.1f} nm (Henke tables).")
+    except ImportError:
+        ss["att_msg"] = "Needs the periodictable package: pip install periodictable"
+    except Exception as e:                                          # noqa: BLE001
+        ss["att_msg"] = f"Could not compute it: {e}"
+
+
+def load_sto():
+    ss["sample_formula"], ss["sample_density"], ss["sample_thickness_nm"] = "SrTiO3", 5.12, 10000.0
+    ss["sample_n"] = round(float(np.interp(ss["probe_wavelength_nm"], *STO_N)), 3)
+    compute_att()
+    if "periodictable" in ss.get("att_msg", ""):
+        ss["xray_atten_nm"] = 159.0
+        ss["att_msg"] = "159 nm = STO at 532 eV (Henke/CXRO); install periodictable to compute other energies."
+
+
 if ss["experiment"] == "optical":
     with sb.expander("Optical probe", expanded=True):
         st.number_input("Probe wavelength [nm]", 100.0, 5000.0, step=10.0, key="probe_wavelength_nm")
         st.toggle("Probe at the Bragg (phase-matched) angle", key="probe_auto_bragg")
         st.number_input("Probe incidence angle from the normal [deg]", -89.0, 89.0, step=0.1, key="probe_angle_deg",
                         disabled=ss["probe_auto_bragg"])
+        st.button("Use SrTiO₃, 10 µm", on_click=load_sto, **WIDE,
+                  help="n of STO at the probe wavelength (approximate literature values, ±0.02) and the X-ray "
+                       "attenuation length at the pump energy from the Henke tables (the CXRO data).")
         st.number_input("Sample refractive index at the probe", 1.0, 5.0, step=0.01, key="sample_n")
         st.number_input("Sample thickness [nm]", 1.0, 1e6, step=10.0, key="sample_thickness_nm")
-        st.number_input("X-ray attenuation length [nm]", 1.0, 1e6, step=10.0, key="xray_atten_nm",
-                        help="The TG only exists as deep as the pump penetrates: grating thickness L = min(thickness, "
-                             "attenuation length). Set your sample's value at 532 eV.")
+        st.number_input("X-ray attenuation length [nm]", 1.0, 1e7, step=1.0, key="xray_atten_nm",
+                        help="1/e intensity depth of the pump. The TG amplitude decays as exp(−z/L_att) into the "
+                             "sample, so it sets the grating depth when it is shorter than the thickness.")
+        c1, c2 = st.columns([1.3, 1])
+        c1.text_input("Formula", key="sample_formula")
+        c2.number_input("ρ [g/cm³]", 0.1, 25.0, step=0.01, key="sample_density")
+        st.button("Compute attenuation (Henke/CXRO)", on_click=compute_att, **WIDE)
+        if ss.get("att_msg"):
+            st.caption(ss["att_msg"])
 
 with sb.expander("Sample and order-selecting slit", expanded=True):
     st.radio("Sample position", ["crossing", "fixed"], key="sample_mode", horizontal=True,
@@ -612,15 +646,22 @@ with tab_an:
         st.info("Switch *Experiment* in the sidebar to **X-ray pump · optical probe** to set the probe and see its "
                 "phase-matching curve here.", icon="🔦")
     else:
-        L_nm = min(p.sample_thickness_nm, p.xray_atten_nm)
+        L_nm = m["probe_L_nm"]
         st.markdown(
             f"**Optical probe, {lam_p:g} nm, transmission.** The probe's in-plane wavevector picks up ±K_x = ±2π/Λ_surface "
-            f"exactly; the mismatch along the normal Δk_z = k_pz ± K_z − k_dz (inside the sample, n = {p.sample_n:g}) gives "
-            f"η_rel = sinc²(Δk_z L/2) with grating depth L = min(thickness, X-ray attenuation length) = {L_nm:g} nm. "
-            f"Phase matched (Bragg) at sin φ_B = λ_probe/(2Λ): **φ_B = {m['probe_bragg_deg']:.3f}°**. "
-            f"A diffracted probe exists only for Λ > λ_probe/2 = {lam_p / 2:g} nm.")
+            f"exactly; the mismatch along the normal, Δk_z = k_pz ± K_z − k_dz (inside the sample, n = {p.sample_n:g}), "
+            f"sets the efficiency. The TG amplitude decays into the sample as e^(−z/L_att) (X-ray attenuation length "
+            f"L_att = {p.xray_atten_nm:g} nm) over the thickness d = {p.sample_thickness_nm:g} nm, so "
+            f"η_rel = |∫₀ᵈ e^(−z/L_att) e^(iΔk_z z) dz|² / |∫₀ᵈ e^(−z/L_att) dz|²: **sinc²(Δk_z d/2) for a uniform slab "
+            f"(d ≪ L_att), a Lorentzian 1/(1 + Δk_z² L_att²) when the pump is absorbed (d ≫ L_att)**. "
+            f"Effective depth {L_nm:.0f} nm, Klein parameter Q = 2πλL/(nΛ²) = {m['probe_Q']:.2f}: {m['probe_regime']}. "
+            f"Bragg angle sin φ_B = λ_probe/(2Λ): **φ_B = {m['probe_bragg_deg']:.3f}°**. A diffracted probe exists only "
+            f"for Λ > λ_probe/2 = {lam_p / 2:g} nm.")
         if m["probe_ok"]:
-            ph = np.linspace(-89.5, 89.5, 3581)
+            acc = m["probe_accept_deg"]
+            half = 90.0 if not np.isfinite(acc) or acc > 30 else max(4 * acc, 2.0)
+            lo_, hi_ = max(m["probe_bragg_deg"] - half, -89.5), min(m["probe_bragg_deg"] + half, 89.5)
+            ph = np.linspace(lo_, hi_, 3001)
             cur = sim.probe_curve(p, Kx, Kz, ph)
             f = go.Figure()
             for mo, col in ((-1, C["A"]), (1, C["B"])):
@@ -628,14 +669,46 @@ with tab_an:
                                        line=dict(color=col, width=2)))
             for xv, lab, col in ((m["probe_bragg_deg"], "Bragg", C["good"]), (-m["probe_bragg_deg"], "−Bragg", C["good"]),
                                  (m["probe_angle_used_deg"], "probe", C["ink"])):
-                f.add_vline(x=xv, line=dict(color=col, width=1.4, dash="dot"), annotation_text=lab)
-            f.update_layout(title=dict(text=f"Phase matching vs probe incidence angle (L = {L_nm:g} nm, n = {p.sample_n:g}): "
-                                            f"acceptance FWHM {m['probe_accept_deg']:.2f}°", font=dict(size=13)),
+                if lo_ <= xv <= hi_:
+                    f.add_vline(x=xv, line=dict(color=col, width=1.4, dash="dot"), annotation_text=lab)
+            f.update_layout(title=dict(text=f"Phase matching vs probe angle: FWHM {acc:.2f}°", font=dict(size=13)),
                             height=400, **LAYOUT)
             f.update_layout(margin=dict(l=60, r=20, t=50, b=90), legend=dict(orientation="h", y=-0.22, yanchor="top"))
-            f.update_xaxes(title="probe incidence angle from the sample normal [deg]", **AX)
-            f.update_yaxes(title="η_rel = sinc²(Δk_z L / 2)", range=[0, 1.05], **AX)
-            st.plotly_chart(f, **WIDE)
+            f.update_xaxes(title="probe incidence angle from the sample normal [deg]", range=[lo_, hi_], **AX)
+            f.update_yaxes(title="η_rel (phase-matching factor)", range=[0, 1.05], **AX)
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(f, **WIDE)
+            # the shape itself, against the mismatch: this depth profile vs a uniform slab of the same depth
+            dk = np.linspace(-6 * math.pi, 6 * math.pi, 1201) / (L_nm * 1e-9)
+            eta_p, _ = sim.depth_factor(dk, p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9)
+            fs = go.Figure()
+            fs.add_trace(go.Scatter(x=dk * L_nm * 1e-9 / 2, y=np.sinc(dk * L_nm * 1e-9 / 2 / math.pi) ** 2,
+                                    name=f"uniform slab, d = {L_nm:.0f} nm: sinc²", line=dict(color=C["muted"], dash="dash")))
+            fs.add_trace(go.Scatter(x=dk * L_nm * 1e-9 / 2, y=eta_p, name="this sample (e^(−z/L_att) over d)",
+                                    line=dict(color=C["SD"], width=2.5)))
+            # the mismatch that the physical angle range (−90°…90°) can actually reach
+            full = np.linspace(-89.5, 89.5, 3581)
+            k0p = 2 * math.pi / (lam_p * 1e-9)
+            kk = p.sample_n * k0p
+            kpx = k0p * np.sin(np.radians(full))
+            mo_ = -1 if Kx > 0 else 1
+            kdx = kpx + mo_ * Kx
+            okk = np.abs(kdx) < kk
+            dkr = (np.sqrt(kk ** 2 - kpx ** 2) + mo_ * Kz - np.sqrt(np.clip(kk ** 2 - kdx ** 2, 0, None)))[okk]
+            if dkr.size:
+                fs.add_vrect(x0=max(dkr.min() * L_nm * 1e-9 / 2, -3 * math.pi), x1=min(dkr.max() * L_nm * 1e-9 / 2, 3 * math.pi),
+                             fillcolor=C["good"], opacity=0.08, line_width=0,
+                             annotation_text="reachable by tilting the probe", annotation_position="top left")
+            fs.update_layout(title=dict(text="Phase-matching shape vs mismatch Δk_z·L_eff/2", font=dict(size=13)),
+                             height=400, **LAYOUT)
+            fs.update_layout(margin=dict(l=60, r=20, t=50, b=90), legend=dict(orientation="h", y=-0.22, yanchor="top"))
+            fs.update_xaxes(title="Δk_z · L_eff / 2  [rad]", range=[-3 * math.pi, 3 * math.pi], **AX)
+            fs.update_yaxes(title="η_rel", range=[0, 1.05], **AX)
+            c2.plotly_chart(fs, **WIDE)
+            st.caption("The green band is the part of the curve the probe can reach between −90° and +90°. "
+                       "A sinc² with visible side lobes needs the grating to be deep and uniform: d ≲ L_att and "
+                       "d ≳ 10 Λ (acceptance inside the sample ≈ 0.9 Λ/d). With a soft X-ray pump the grating is only "
+                       "L_att deep, the curve is a broad Lorentzian and phase matching is not critical.")
             # Bragg angle and acceptance vs TG period, for orientation
             tgs = np.geomspace(max(lam_p / 2 * 1.001, 5), max(lam_p * 20, m["tg_period_nm"] * 2), 300)
             fb = go.Figure(go.Scatter(x=tgs, y=np.degrees(np.arcsin(lam_p / (2 * tgs))), line=dict(color=C["SD"], width=2),

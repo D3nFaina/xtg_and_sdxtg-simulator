@@ -115,9 +115,14 @@ class Params:
     probe_wavelength_nm: float = 400.0   # optical probe
     probe_auto_bragg: bool = True        # put the probe at the Bragg (phase-matched) angle
     probe_angle_deg: float = 30.0        # external incidence angle from the sample normal (split plane)
-    sample_n: float = 1.5                # sample refractive index at the probe wavelength
-    sample_thickness_nm: float = 100.0
-    xray_atten_nm: float = 200.0         # X-ray attenuation length: depth of the TG inside the sample
+    # sample: SrTiO3, 10 µm. n at 400 nm ~2.65 (approximate literature value; STO is transparent
+    # below its 3.2 eV gap). X-ray 1/e intensity attenuation length 159 nm at 532 eV (Henke/CXRO
+    # tables, rho = 5.12 g/cm3): the TG amplitude decays as exp(-z / xray_atten_nm) into the sample.
+    sample_formula: str = "SrTiO3"
+    sample_density: float = 5.12         # g/cm3, for the Henke-table attenuation length
+    sample_n: float = 2.65               # sample refractive index at the probe wavelength
+    sample_thickness_nm: float = 10000.0
+    xray_atten_nm: float = 159.0         # X-ray attenuation length (1/e of the intensity)
     slit_upstream_mm: float = 1.0        # slit distance upstream of the sample
     slit_auto: bool = True               # open the slit just around the wanted orders
     slit_width_um: float = 300.0         # manual slit width (centered on axis)
@@ -171,16 +176,39 @@ def tg_range_text(p: Params) -> str:
     return f"{lo:g} nm (±{p.tg_tol_pct:g} %)" if math.isclose(lo, hi) else f"{lo:g}–{hi:g} nm"
 
 
+def xray_atten_length_nm(formula: str, density: float, wavelength_nm: float) -> float:
+    """1/e intensity attenuation length from the Henke tables (the data behind CXRO), via the
+    `periodictable` package (pip install periodictable). Raises ImportError if it is missing."""
+    import periodictable.xsf as xsf
+    E_keV = 1.239842 / wavelength_nm
+    n = xsf.index_of_refraction(formula, density=density, energy=E_keV)
+    beta = -float(np.imag(n))
+    return wavelength_nm / (4 * math.pi * beta)
+
+
+def depth_factor(dk, La, d):
+    """Phase-matching factor of a TG whose amplitude decays as exp(-z/La) over the thickness d:
+        η_rel = |∫₀ᵈ e^{-z/La} e^{iΔk z} dz|² / |∫₀ᵈ e^{-z/La} dz|²
+    d ≪ La: uniform slab, sinc²(Δk d/2).   d ≫ La: Lorentzian 1/(1 + (Δk La)²).
+    Returns (η_rel, effective depth L_eff = ∫ e^{-z/La} dz)."""
+    dk = np.asarray(dk, float)
+    a = 1.0 / La if La > 0 else 1e30
+    if a * d < 1e-6:                                   # no absorption: uniform slab
+        return np.sinc(dk * d / 2 / math.pi) ** 2, d
+    F0 = (1 - math.exp(-a * d)) / a
+    F = (1 - np.exp((-a + 1j * dk) * d)) / (a - 1j * dk)
+    return np.abs(F) ** 2 / F0 ** 2, F0
+
+
 def probe_curve(p: Params, Kx, Kz, phi_deg):
     """Optical probe diffraction from the X-ray TG, transmission geometry, probe in the split plane.
     Grating vector (Kx along the surface, Kz along the normal); the in-plane wavevector is conserved
-    exactly, the mismatch along the normal Δk_z = k_pz + m K_z − k_dz sets the efficiency
-        η_rel = sinc²(Δk_z L / 2),   L = min(sample thickness, X-ray attenuation length).
+    exactly, the mismatch along the normal Δk_z = k_pz + m K_z − k_dz sets the efficiency through
+    depth_factor() (TG amplitude ∝ exp(-z / X-ray attenuation length) over the sample thickness).
     Returns dict order -> (eta_rel, external diffraction angle in deg, nan if evanescent/trapped)."""
     phi = np.radians(np.asarray(phi_deg, float))
     k0 = 2 * math.pi / (p.probe_wavelength_nm * 1e-9)
     k = p.sample_n * k0
-    L = min(p.sample_thickness_nm, p.xray_atten_nm) * 1e-9
     kpx = k0 * np.sin(phi)
     kpz = np.sqrt(k ** 2 - kpx ** 2)
     out = {}
@@ -189,7 +217,8 @@ def probe_curve(p: Params, Kx, Kz, phi_deg):
         prop = np.abs(kdx) < k
         kdz = np.sqrt(np.clip(k ** 2 - kdx ** 2, 0, None))
         dk = kpz + mo * Kz - kdz
-        eta = np.where(prop, np.sinc(dk * L / 2 / math.pi) ** 2, 0.0)
+        f, _ = depth_factor(dk, p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9)
+        eta = np.where(prop, f, 0.0)
         ang = np.where(np.abs(kdx) < k0, np.degrees(np.arcsin(np.clip(kdx / k0, -1, 1))), np.nan)
         out[mo] = (eta, ang)
     return out
@@ -206,7 +235,7 @@ def probe_metrics(p: Params, Kx, Kz):
     cur = probe_curve(p, Kx, Kz, [phi])
     eta = max(float(cur[-1][0][0]), float(cur[1][0][0]))
     best = -1 if cur[-1][0][0] >= cur[1][0][0] else 1
-    # angular acceptance: FWHM of the sinc² around the Bragg angle
+    # angular acceptance: FWHM of the phase-matching curve around the Bragg angle
     ph = np.linspace(-89.9, 89.9, 17981)
     e = probe_curve(p, Kx, Kz, ph)[mo][0]
     i0 = int(np.argmin(np.abs(ph - bragg)))
@@ -218,9 +247,13 @@ def probe_metrics(p: Params, Kx, Kz):
         while hi < len(e) - 1 and e[hi + 1] >= 0.5 * e[i0]:
             hi += 1
         acc = float(ph[hi] - ph[lo])         # ~180: thin (Raman-Nath) grating, no angular selectivity
+    _, L_eff = depth_factor(0.0, p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9)
+    # Klein-Cook parameter: Q = 2π λ L / (n Λ²);  Q < 1 thin (Raman-Nath), Q > 10 thick (Bragg)
+    Q = 2 * math.pi * lam_p * L_eff / (p.sample_n * Ls ** 2)
     return dict(probe_ok=float(ok), probe_bragg_deg=bragg if ok else float("nan"), probe_angle_used_deg=phi,
                 probe_eta_rel=eta, probe_order=best, probe_diff_angle_deg=float(cur[best][1][0]),
-                probe_accept_deg=acc, probe_L_nm=min(p.sample_thickness_nm, p.xray_atten_nm))
+                probe_accept_deg=acc, probe_L_nm=L_eff * 1e9, probe_Q=Q,
+                probe_regime="thin (Raman–Nath)" if Q < 1 else ("thick (Bragg)" if Q > 10 else "intermediate"))
 
 
 def _mean_incidence(p: Params, rays=None):
@@ -952,7 +985,8 @@ SCAN_INFO = {
         "External incidence angle (from the sample normal) at which the optical probe is phase matched to the "
         "TG: sin φ_B = λ_probe / (2 Λ_surface). Blank where Λ < λ_probe/2 (no diffracted probe order)."),
     "probe_eta_rel": ("Probe phase-matching factor", "",
-        "sinc²(Δk_z L/2) at the probe angle used (1 at the Bragg angle), L = min(thickness, X-ray attenuation length)."),
+        "|∫ g(z) e^{iΔk_z z} dz|² / |∫ g dz|² at the probe angle used (1 at the Bragg angle), g(z) = e^{−z/L_att} over the "
+        "sample thickness: sinc² for a uniform slab, Lorentzian when the X-ray attenuation length is the shorter."),
     "opt_fom": ("Optical-probe figure of merit", "rel.",
         "(TG contrast × pump fluence A+B)² × phase-matching factor: relative diffracted probe signal."),
 }
@@ -1190,7 +1224,8 @@ def summary(res: Result) -> str:
         L.append(f"optical probe {p.probe_wavelength_nm:g} nm: Bragg angle {m['probe_bragg_deg']:.2f}° from the normal, "
                  f"used {m['probe_angle_used_deg']:.2f}° → η_rel = {m['probe_eta_rel']:.3f}, diffracted order "
                  f"{m['probe_order']:+d} leaves at {m['probe_diff_angle_deg']:.2f}°; acceptance (FWHM) "
-                 f"{m['probe_accept_deg']:.2f}° for L = {m['probe_L_nm']:g} nm, n = {p.sample_n:g}")
+                 f"{m['probe_accept_deg']:.2f}° for effective depth {m['probe_L_nm']:.0f} nm (thickness {p.sample_thickness_nm:g} nm, "
+                 f"X-ray attenuation {p.xray_atten_nm:g} nm), n = {p.sample_n:g}; Klein Q = {m['probe_Q']:.2f}, {m['probe_regime']}")
     for w in res.warnings:
         L.append("WARNING: " + w)
     return "\n".join(L)
