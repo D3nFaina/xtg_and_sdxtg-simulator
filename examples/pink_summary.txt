@@ -1,0 +1,18 @@
+λ = 2.33 nm, ΔE/E = 0.5%, beam 4.0×4.0 mm, split along x
+TG target 20–300 nm; grating period solved for Λ = 50 nm → Λ = 50.0 nm (in range)
+grating z = 1.8000 m, p = 108.6 nm, η(±1) = 10.1%, η(0) = 25.0%
+1st-order angle λ/p = 21.46 mrad; beam at grating 151 µm
+1st orders cross at z = 1.8159 m (15.9 mm after grating)
+sample z = 1.8159 m; sample→CCD = 184.1 mm
+slit z = 1.8149 m, opening [-227, 227] µm
+order separation at slit = 44 µm (nearest B(0)), contamination = 0%
+at sample: A(-1) 130×494 µm, B(+1) 130×494 µm, overlap 0.74
+crossing angle 46.58 mrad → TG period Λ = 50.0 nm (~2601 fringes)
+angles to the sample normal (tilt 0 mrad): A(-1) -23.291 mrad (-1.3345°), B(+1) +23.291 mrad (+1.3345°); Λ along the surface 50.0 nm, fringe planes tilted 0.00 mrad
+A/B overlap region z = 1.8126–1.8229 m (10.3 mm); sample margin 3.3 mm
+TG contrast 0.24 (A–B coherence 0.27: they leave the KB 7.38 mm apart, l_coh = 4.59 mm)
+photons in A(-1)+B(+1): 0.77% of KB input; peak fluence 0.528+0.528 mJ/cm²
+pulse-front tilt across each 1st-order beam ≈ 10.8 fs
+direct-beam beamstop at z = 1.8659 m (50 mm after sample), [-1243, 1243] µm: SD clearance 2126 µm, direct leak 0.2%, SD blocked 0%
+CCD: direct beams at -4292/4292 µm, SD at -12871/12871 µm (FWHM 45 µm); best SD beam 13.8 mm inside the 27.6 mm chip edge 
+wave-optics check: TG contrast 0.24 (ray model 0.24, fully coherent 0.89)

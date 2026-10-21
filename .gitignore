@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+sdxtg_app.log
+sdxtg_output/
+results/
+.ipynb_checkpoints/
