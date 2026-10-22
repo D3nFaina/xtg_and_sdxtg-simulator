@@ -43,6 +43,7 @@ import streamlit as st
 
 import sdxtg_sim as sim
 import sdxtg_wave as wave
+import sdxtg_3d as s3d
 
 # Compatibility with older Streamlit releases (width="stretch" exists only from 1.46 on).
 ST_VER = tuple(int(x) for x in st.__version__.split(".")[:2] if x.isdigit())
@@ -211,6 +212,7 @@ with sb.expander("Grating", expanded=True):
     st.slider("Bar phase φ [π]", 0.0, 2.0, step=0.01, key="bar_phase_pi",
               disabled=ss["grating_type"] != "phase")
     st.number_input("Membrane transmission", 0.0, 1.0, step=0.05, key="membrane_T")
+    st.number_input("Grating chip size [mm]", 0.5, 50.0, step=0.5, key="grating_chip_mm")
 
 # SrTiO3 refractive index (ordinary, room temperature), approximate literature values
 STO_N = ([400, 450, 500, 589, 633, 800, 1030, 1300], [2.64, 2.53, 2.47, 2.41, 2.39, 2.34, 2.31, 2.29])
@@ -243,6 +245,14 @@ if ss["experiment"] == "optical":
         st.toggle("Probe at the Bragg (phase-matched) angle", key="probe_auto_bragg")
         st.number_input("Probe incidence angle from the normal [deg]", -89.0, 89.0, step=0.1, key="probe_angle_deg",
                         disabled=ss["probe_auto_bragg"])
+        st.slider("Plane of incidence (azimuth) [deg]", -90.0, 90.0, step=1.0, key="probe_azimuth_deg",
+                  help="0 = the probe comes in the split plane (x–z), which contains the grating vector; 90 = the "
+                       "other plane (y–z). Phase matching needs sin φ cos χ = λ/(2Λ), so tilting the plane raises φ_B.")
+        st.number_input("Steering mirror → sample [mm]", 5.0, 1000.0, step=1.0, key="probe_mirror_dist_mm")
+        st.number_input("Mirror diameter [mm]", 1.0, 100.0, step=0.1, key="probe_mirror_diam_mm")
+        st.radio("Probe reaches the mirror", ["z", "side"], key="probe_feed", horizontal=True,
+                 format_func=lambda v: "along the beamline (+z)" if v == "z" else "from the side")
+        st.number_input("Probe FWHM on the sample [µm]", 1.0, 5000.0, step=10.0, key="probe_waist_um")
         st.button("Use SrTiO₃, 10 µm", on_click=load_sto, **WIDE,
                   help="n of STO at the probe wavelength (approximate literature values, ±0.02) and the X-ray "
                        "attenuation length at the pump energy from the Henke tables (the CXRO data).")
@@ -267,6 +277,9 @@ with sb.expander("Sample and order-selecting slit", expanded=True):
                     help="Rotation of the sample normal from the beam axis z, in the split plane. "
                          "0 = normal along z: A(−1) and B(+1) come in at ±θ/2.")
     st.slider("Slit distance before sample [mm]", 0.1, 100.0, step=0.1, key="slit_upstream_mm")
+    c1, c2 = st.columns(2)
+    c1.number_input("Blade length [mm]", 0.5, 100.0, step=0.5, key="slit_blade_len_mm")
+    c2.number_input("Blade height [mm]", 0.5, 100.0, step=0.5, key="slit_blade_h_mm")
     st.toggle("Auto slit opening", key="slit_auto")
     if ss["slit_auto"]:
         st.slider("Extra opening per side [µm]", 0.0, 200.0, step=1.0, key="slit_margin_um")
@@ -377,9 +390,24 @@ for w in res.warnings:
     st.warning(w, icon="⚠️")
 st.write("")
 
-tab_bl, tab_sz, tab_pr, tab_an, tab_sc, tab_wv, tab_md = st.tabs(
-    ["🛰️ Beamline", "📏 Beam size", "🎯 Slit · sample · CCD", "📐 Angles · optical probe", "🗺️ Correlation scan",
-     "🌊 Wave-optics check", "📘 Model & assumptions"])
+tab_bl, tab_3d, tab_sz, tab_pr, tab_an, tab_sc, tab_wv, tab_md = st.tabs(
+    ["🛰️ Beamline", "🧊 3D view", "📏 Beam size", "🎯 Slit · sample · CCD", "📐 Angles · optical probe",
+     "🗺️ Correlation scan", "🌊 Wave-optics check", "📘 Model & assumptions"])
+
+with tab_3d:
+    c1, c2, c3, c4 = st.columns([1.4, 1.4, 1, 1])
+    reg = c1.radio("Region", ["full", "sample"], horizontal=True, key="v3d_region",
+                   format_func=lambda v: "whole beamline" if v == "full" else "around the sample (to scale)")
+    ex = c2.select_slider("Transverse exaggeration (x, y)", [1, 2, 5, 10, 20, 50, 100, 200, 500],
+                          value=100 if reg == "full" else 1, key=f"v3d_exag_{reg}")
+    orders = c3.toggle("Other orders", value=True, key="v3d_orders")
+    rays_on = c4.toggle("Ray cloud", value=False, key="v3d_rays")
+    st.plotly_chart(s3d.figure_3d(res, reg, float(ex), orders, rays_on), **WIDE)
+    st.caption("Drag to rotate, scroll to zoom, right-drag to pan, double-click to reset. Each beam is a tube through "
+               "the ellipses spanned by its ray envelopes (2–98 %) in x and y, so the shapes come from the same rays as "
+               "the x and y views. With an exaggeration other than 1 the transverse axes are stretched and angles look "
+               "steeper than they are; 'around the sample' at ×1 is to scale.")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -655,12 +683,14 @@ with tab_an:
             f"η_rel = |∫₀ᵈ e^(−z/L_att) e^(iΔk_z z) dz|² / |∫₀ᵈ e^(−z/L_att) dz|²: **sinc²(Δk_z d/2) for a uniform slab "
             f"(d ≪ L_att), a Lorentzian 1/(1 + Δk_z² L_att²) when the pump is absorbed (d ≫ L_att)**. "
             f"Effective depth {L_nm:.0f} nm, Klein parameter Q = 2πλL/(nΛ²) = {m['probe_Q']:.2f}: {m['probe_regime']}. "
-            f"Bragg angle sin φ_B = λ_probe/(2Λ): **φ_B = {m['probe_bragg_deg']:.3f}°**. A diffracted probe exists only "
+            f"Bragg angle sin φ_B cos χ = λ_probe/(2Λ) (χ = {p.probe_azimuth_deg:g}° plane of incidence): "
+            f"**φ_B = {m['probe_bragg_deg']:.3f}°**. A diffracted probe exists only "
             f"for Λ > λ_probe/2 = {lam_p / 2:g} nm.")
         if m["probe_ok"]:
             acc = m["probe_accept_deg"]
             half = 90.0 if not np.isfinite(acc) or acc > 30 else max(4 * acc, 2.0)
-            lo_, hi_ = max(m["probe_bragg_deg"] - half, -89.5), min(m["probe_bragg_deg"] + half, 89.5)
+            ctr = m["probe_bragg_deg"] if np.isfinite(m["probe_bragg_deg"]) else m["probe_angle_used_deg"]
+            lo_, hi_ = max(ctr - half, -89.5), min(ctr + half, 89.5)
             ph = np.linspace(lo_, hi_, 3001)
             cur = sim.probe_curve(p, Kx, Kz, ph)
             f = go.Figure()
@@ -709,6 +739,23 @@ with tab_an:
                        "A sinc² with visible side lobes needs the grating to be deep and uniform: d ≲ L_att and "
                        "d ≳ 10 Λ (acceptance inside the sample ≈ 0.9 Λ/d). With a soft X-ray pump the grating is only "
                        "L_att deep, the curve is a broad Lorentzian and phase matching is not critical.")
+            g = sim.probe_geometry(res)
+            st.markdown("**Probe layout.** The steering mirror sits on the probe line, "
+                        f"{p.probe_mirror_dist_mm:g} mm before the sample; it is fed "
+                        + ("along the beamline (+z)." if p.probe_feed == "z" else "from the side.")
+                        + f" Mirror centre at x = {m['probe_mirror_x_mm']:+.1f} mm, y = {m['probe_mirror_y_mm']:+.1f} mm, "
+                        f"z = {m['probe_mirror_z']:.4f} m ({(z_s_ := res.z['sample'] - m['probe_mirror_z']) * 1e3:.1f} mm "
+                        f"before the sample); angle of incidence on the mirror {m['probe_mirror_aoi_deg']:.1f}°; "
+                        f"clearance from the X-ray beams {m['probe_mirror_clear_mm']:.1f} mm.")
+            if g["obstacles"]:
+                for o in g["obstacles"]:
+                    st.warning("Probe: " + o, icon="🚧")
+            else:
+                st.success("The probe path is clear: no slit blade, grating chip or beamstop in the way, and the "
+                           "mirror clears the X-ray beams.", icon="✅")
+            c1, c2 = st.columns(2)
+            c1.plotly_chart(s3d.figure_probe_2d(res, "xz"), **WIDE)
+            c2.plotly_chart(s3d.figure_probe_2d(res, "yz"), **WIDE)
             # Bragg angle and acceptance vs TG period, for orientation
             tgs = np.geomspace(max(lam_p / 2 * 1.001, 5), max(lam_p * 20, m["tg_period_nm"] * 2), 300)
             fb = go.Figure(go.Scatter(x=tgs, y=np.degrees(np.arcsin(lam_p / (2 * tgs))), line=dict(color=C["SD"], width=2),

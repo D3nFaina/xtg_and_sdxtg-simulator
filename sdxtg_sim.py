@@ -114,7 +114,15 @@ class Params:
     experiment: str = "sd"
     probe_wavelength_nm: float = 400.0   # optical probe
     probe_auto_bragg: bool = True        # put the probe at the Bragg (phase-matched) angle
-    probe_angle_deg: float = 30.0        # external incidence angle from the sample normal (split plane)
+    probe_angle_deg: float = 30.0        # external incidence angle from the sample normal
+    probe_azimuth_deg: float = 0.0       # plane of incidence: 0 = split plane (x–z), 90 = the other plane (y–z)
+    probe_mirror_dist_mm: float = 60.0   # steering mirror → sample distance
+    probe_mirror_diam_mm: float = 25.4   # steering mirror diameter (1")
+    probe_feed: str = "z"                # probe reaches the mirror travelling along +z ("z") or sideways ("side")
+    probe_waist_um: float = 300.0        # probe FWHM on the sample (drawing and overlap only)
+    grating_chip_mm: float = 5.0         # grating chip (frame) size, square
+    slit_blade_len_mm: float = 10.0      # how far each slit blade reaches out from the opening
+    slit_blade_h_mm: float = 10.0        # blade height along the other axis
     # sample: SrTiO3, 10 µm. n at 400 nm ~2.65 (approximate literature value; STO is transparent
     # below its 3.2 eV gap). X-ray 1/e intensity attenuation length 159 nm at 532 eV (Henke/CXRO
     # tables, rho = 5.12 g/cm3): the TG amplitude decays as exp(-z / xray_atten_nm) into the sample.
@@ -200,53 +208,66 @@ def depth_factor(dk, La, d):
     return np.abs(F) ** 2 / F0 ** 2, F0
 
 
-def probe_curve(p: Params, Kx, Kz, phi_deg):
-    """Optical probe diffraction from the X-ray TG, transmission geometry, probe in the split plane.
-    Grating vector (Kx along the surface, Kz along the normal); the in-plane wavevector is conserved
-    exactly, the mismatch along the normal Δk_z = k_pz + m K_z − k_dz sets the efficiency through
-    depth_factor() (TG amplitude ∝ exp(-z / X-ray attenuation length) over the sample thickness).
-    Returns dict order -> (eta_rel, external diffraction angle in deg, nan if evanescent/trapped)."""
+def probe_curve(p: Params, Kx, Kz, phi_deg, chi_deg=None):
+    """Optical probe diffraction from the X-ray TG, transmission geometry.
+    The probe comes in at polar angle φ from the sample normal, in the plane of incidence at azimuth χ
+    from the split plane (χ = 0: x–z plane, which contains the grating vector). Grating vector
+    (Kx along the surface, Kz along the normal); the in-plane wavevector is conserved exactly,
+    k_d,∥ = k_p,∥ + m (Kx, 0), and the mismatch along the normal Δk_z = k_pz + m K_z − k_dz sets the
+    efficiency through depth_factor() (TG amplitude ∝ exp(-z / X-ray attenuation length)).
+    Returns dict order -> (eta_rel, external diffraction angle from the normal in deg, nan if trapped)."""
+    chi = math.radians(p.probe_azimuth_deg if chi_deg is None else chi_deg)
     phi = np.radians(np.asarray(phi_deg, float))
     k0 = 2 * math.pi / (p.probe_wavelength_nm * 1e-9)
     k = p.sample_n * k0
-    kpx = k0 * np.sin(phi)
-    kpz = np.sqrt(k ** 2 - kpx ** 2)
+    kpx, kpy = k0 * np.sin(phi) * math.cos(chi), k0 * np.sin(phi) * math.sin(chi)
+    kpz = np.sqrt(k ** 2 - kpx ** 2 - kpy ** 2)
     out = {}
     for mo in (-1, +1):
         kdx = kpx + mo * Kx
-        prop = np.abs(kdx) < k
-        kdz = np.sqrt(np.clip(k ** 2 - kdx ** 2, 0, None))
+        kpar = np.hypot(kdx, kpy)
+        prop = kpar < k
+        kdz = np.sqrt(np.clip(k ** 2 - kpar ** 2, 0, None))
         dk = kpz + mo * Kz - kdz
         f, _ = depth_factor(dk, p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9)
         eta = np.where(prop, f, 0.0)
-        ang = np.where(np.abs(kdx) < k0, np.degrees(np.arcsin(np.clip(kdx / k0, -1, 1))), np.nan)
+        ang = np.where(kpar < k0, np.degrees(np.arcsin(np.clip(kpar / k0, -1, 1))) * np.sign(kdx + 1e-30), np.nan)
         out[mo] = (eta, ang)
     return out
+
+
+def bragg_angle_deg(p: Params, Ls, chi_deg=None):
+    """External Bragg angle in the plane of incidence at azimuth χ: phase matching needs the probe's
+    x component of k to be K/2, i.e. sin φ cos χ = λ_probe / (2 Λ). nan if not reachable."""
+    chi = math.radians(p.probe_azimuth_deg if chi_deg is None else chi_deg)
+    s_ = p.probe_wavelength_nm * 1e-9 / (2 * Ls * max(abs(math.cos(chi)), 1e-12))
+    return math.degrees(math.asin(s_)) if s_ < 1 else float("nan")
 
 
 def probe_metrics(p: Params, Kx, Kz):
     lam_p = p.probe_wavelength_nm * 1e-9
     Ls = 2 * math.pi / abs(Kx)
     ok = lam_p / (2 * Ls) < 1
-    bragg = math.degrees(math.asin(min(lam_p / (2 * Ls), 1.0)))
+    bragg = bragg_angle_deg(p, Ls)
     # the order that is phase-matched for a positive incidence angle is m = -sign(Kx)
     mo = -1 if Kx > 0 else +1
-    phi = bragg if p.probe_auto_bragg else p.probe_angle_deg
+    phi = bragg if (p.probe_auto_bragg and np.isfinite(bragg)) else p.probe_angle_deg
     cur = probe_curve(p, Kx, Kz, [phi])
     eta = max(float(cur[-1][0][0]), float(cur[1][0][0]))
     best = -1 if cur[-1][0][0] >= cur[1][0][0] else 1
     # angular acceptance: FWHM of the phase-matching curve around the Bragg angle
     ph = np.linspace(-89.9, 89.9, 17981)
     e = probe_curve(p, Kx, Kz, ph)[mo][0]
-    i0 = int(np.argmin(np.abs(ph - bragg)))
     acc = float("nan")
-    if e[i0] > 0:
-        lo, hi = i0, i0
-        while lo > 0 and e[lo - 1] >= 0.5 * e[i0]:
-            lo -= 1
-        while hi < len(e) - 1 and e[hi + 1] >= 0.5 * e[i0]:
-            hi += 1
-        acc = float(ph[hi] - ph[lo])         # ~180: thin (Raman-Nath) grating, no angular selectivity
+    if np.isfinite(bragg):
+        i0 = int(np.argmin(np.abs(ph - bragg)))
+        if e[i0] > 0:
+            lo, hi = i0, i0
+            while lo > 0 and e[lo - 1] >= 0.5 * e[i0]:
+                lo -= 1
+            while hi < len(e) - 1 and e[hi + 1] >= 0.5 * e[i0]:
+                hi += 1
+            acc = float(ph[hi] - ph[lo])     # ~180: thin (Raman-Nath) grating, no angular selectivity
     _, L_eff = depth_factor(0.0, p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9)
     # Klein-Cook parameter: Q = 2π λ L / (n Λ²);  Q < 1 thin (Raman-Nath), Q > 10 thick (Bragg)
     Q = 2 * math.pi * lam_p * L_eff / (p.sample_n * Ls ** 2)
@@ -254,6 +275,86 @@ def probe_metrics(p: Params, Kx, Kz):
                 probe_eta_rel=eta, probe_order=best, probe_diff_angle_deg=float(cur[best][1][0]),
                 probe_accept_deg=acc, probe_L_nm=L_eff * 1e9, probe_Q=Q,
                 probe_regime="thin (Raman–Nath)" if Q < 1 else ("thick (Bragg)" if Q > 10 else "intermediate"))
+
+
+def _unit(v):
+    v = np.asarray(v, float)
+    return v / np.linalg.norm(v)
+
+
+def probe_geometry(res: "Result") -> dict:
+    """Lab-frame geometry of the optical probe (vectors are (x, y, z), metres; x = split axis).
+    The probe hits the sample centre at polar angle φ from the sample normal, azimuth χ; a flat steering
+    mirror sits probe_mirror_dist_mm upstream along the probe line and folds the probe in from its feed
+    direction (+z from upstream, or sideways). Checks whether the incoming probe clips the slit blades
+    or the grating chip, whether the outgoing beams hit the direct-beam stop, and whether the mirror
+    clears the X-ray beams."""
+    p, m, z = res.p, res.metrics, res.z
+    tilt = p.sample_tilt_mrad * 1e-3
+    nrm = np.array([math.sin(tilt), 0.0, math.cos(tilt)])          # sample normal
+    e1 = np.array([math.cos(tilt), 0.0, -math.sin(tilt)])          # in-plane, along the split axis
+    e2 = np.array([0.0, 1.0, 0.0])
+    phi, chi = math.radians(m["probe_angle_used_deg"]), math.radians(p.probe_azimuth_deg)
+    # wavevector direction of the incoming probe: in-plane part along (cos χ, sin χ), towards +z
+    d_in = _unit(math.sin(phi) * (math.cos(chi) * e1 + math.sin(chi) * e2) + math.cos(phi) * nrm)
+    S = np.array([0.0, 0.0, z["sample"]])
+    D = p.probe_mirror_dist_mm * 1e-3
+    M = S - D * d_in                                                # mirror centre
+    feed = np.array([0.0, 0.0, 1.0]) if p.probe_feed == "z" else _unit([-math.copysign(1, M[0] or 1), 0, 0])
+    mn = _unit(d_in - feed) if np.linalg.norm(d_in - feed) > 1e-9 else -feed   # mirror normal
+    aoi = math.degrees(math.acos(np.clip(abs(np.dot(feed, mn)), -1, 1)))      # angle of incidence on mirror
+    # diffracted probe (stronger order) and transmitted probe, outgoing directions
+    k0 = 1.0
+    sx, sy = math.sin(phi) * math.cos(chi), math.sin(phi) * math.sin(chi)
+    Ls = m["tg_surface_nm"] * 1e-9
+    gx = m["probe_order"] * p.probe_wavelength_nm * 1e-9 / Ls * (1 if m["angle_B_mrad"] > m["angle_A_mrad"] else -1)
+    ux, uy = sx + gx, sy
+    d_tr = d_in
+    d_df = _unit(ux * e1 + uy * e2 + math.sqrt(max(1 - ux * ux - uy * uy, 0)) * nrm) if ux * ux + uy * uy < 1 else None
+
+    def at_plane(P0, d, zp):                    # where a line crosses the plane z = zp
+        t = (zp - P0[2]) / d[2]
+        return P0 + t * d
+    obst = []
+    # slit blades (in x beyond the opening, |y| < h/2)
+    q = at_plane(S, d_in, z["slit"])
+    lo, hi = res.slit
+    bl, bh = p.slit_blade_len_mm * 1e-3, p.slit_blade_h_mm * 1e-3 / 2
+    w = p.probe_waist_um * 1e-6 / 2                # half width (FWHM / 2) of the probe
+    if abs(q[1]) - w < bh and ((lo - bl < q[0] + w and q[0] - w < lo) or (hi < q[0] + w and q[0] - w < hi + bl)):
+        obst.append(f"the incoming probe hits a slit blade ({(z['sample'] - z['slit']) * 1e3:.1f} mm before the "
+                    f"sample, at x = {q[0] * 1e3:+.2f} mm, y = {q[1] * 1e3:+.2f} mm)")
+    # grating chip
+    if M[2] < p.z_grating < S[2]:
+        q = at_plane(S, d_in, p.z_grating)
+        if max(abs(q[0]), abs(q[1])) - w < p.grating_chip_mm * 1e-3 / 2:
+            obst.append(f"the incoming probe hits the grating chip (at x = {q[0] * 1e3:+.2f} mm, y = {q[1] * 1e3:+.2f} mm)")
+    # direct-beam stop: a bar along y covering res.dbs in x
+    if "dbs" in z and res.dbs != (0.0, 0.0):
+        for nm, d in (("transmitted", d_tr), ("diffracted", d_df)):
+            if d is None:
+                continue
+            q = at_plane(S, d, z["dbs"])
+            if res.dbs[0] - w < q[0] < res.dbs[1] + w:
+                obst.append(f"the {nm} probe hits the direct-beam stop")
+    # mirror vs X-ray beams: closest approach of the mirror disc to the X-ray beam envelope at its z
+    R_m = p.probe_mirror_diam_mm * 1e-3 / 2
+    zm = M[2]
+    rr = res.rays
+    if zm > p.z_grating:
+        xs = np.concatenate([rr.s(zm, b.idx[b.slit_mask] if zm > z["slit"] else b.idx, b.order)
+                             for b in res.bundles if b.wanted])
+    else:
+        xs = rr.s(zm, rr.full_idx)
+    xr = float(np.max(np.abs(xs))) if xs.size else 0.0
+    # mirror edge nearest to the axis (disc of radius R_m around M, tilted): conservative = centre distance − R_m
+    clear = math.hypot(M[0], M[1]) - R_m - xr
+    if clear < 0:
+        obst.append(f"the steering mirror ({p.probe_mirror_diam_mm:g} mm) would cut the X-ray beams "
+                    f"({-clear * 1e3:.1f} mm overlap): move it further away or use a smaller mirror")
+    return dict(mirror=M, mirror_normal=mn, feed=feed, d_in=d_in, d_tr=d_tr, d_df=d_df, S=S, nrm=nrm,
+                mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst,
+                mirror_xyz_mm=(M[0] * 1e3, M[1] * 1e3, M[2] * 1e3))
 
 
 def _mean_incidence(p: Params, rays=None):
@@ -626,6 +727,8 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
              tg_tilt_mrad=math.atan2(Kz, Kx) * 1e3)
     if p.experiment == "optical":
         m.update(probe_metrics(p, Kx, Kz))
+        if p.probe_auto_bragg and not np.isfinite(m["probe_bragg_deg"]) and m["probe_ok"]:
+            warn.append(f"no Bragg angle at azimuth {p.probe_azimuth_deg:g}° (needs λ/(2Λ cos χ) < 1)")
         if not m["probe_ok"]:
             warn.append(f"TG period {tg_period * 1e9:.0f} nm < λ_probe/2 = {p.probe_wavelength_nm / 2:g} nm: "
                         "the optical probe has no diffracted order")
@@ -720,6 +823,12 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
     res = Result(p, R, bundles, zpl, m, warn, slit=(lo, hi))
     if full:
         _detector(res, wA, wB, sA_s, sB_s)
+    if p.experiment == "optical" and np.isfinite(m["probe_angle_used_deg"]):
+        g = probe_geometry(res)
+        m.update(probe_mirror_clear_mm=g["mirror_clear_mm"], probe_mirror_aoi_deg=g["mirror_aoi_deg"],
+                 probe_mirror_z=g["mirror"][2], probe_mirror_x_mm=g["mirror"][0] * 1e3,
+                 probe_mirror_y_mm=g["mirror"][1] * 1e3, probe_clashes=float(len(g["obstacles"])))
+        res.warnings.extend("probe: " + o for o in g["obstacles"])
     return res
 
 

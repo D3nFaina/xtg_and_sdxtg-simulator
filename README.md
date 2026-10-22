@@ -15,6 +15,7 @@ sample where they cross → direct-beam beamstop → Princeton CCD at the KB foc
 | `sdxtg_app.py` | the GUI, a browser app (Streamlit + Plotly) |
 | `run_app.py` | launcher for the GUI (also used when you run `sdxtg_app.py` with Spyder F5 or `python`) |
 | `sdxtg_sim.py` | ray-model physics core, correlation scans, and a command line that runs both cases and writes PNG/CSV |
+| `sdxtg_3d.py` | 3D view of the setup and the 2D probe-layout drawings |
 | `sdxtg_wave.py` | wave-optics (Fresnel) propagator used to check the ray model |
 | `.streamlit/config.toml` | colour theme of the app |
 | `requirements.txt` | Python packages |
@@ -121,6 +122,18 @@ python sdxtg_app.py
   angular acceptance (FWHM) and the exit angle. A diffracted probe exists only for **Λ > λ_probe / 2**, which becomes a
   feasibility condition (the SD/CCD conditions are dropped in this mode). Figure of merit:
   (TG contrast × pump fluence)² × η_rel.
+
+### Probe layout and 3D view
+
+- **Steering mirror.** The probe comes from a movable mirror on the probe line, a distance D (default 60 mm) before the
+  sample, fed along the beamline (+z) or from the side. The mirror tilt follows from the probe angle and azimuth χ
+  (χ = 0: plane of incidence = x–z, the TG plane). The tab prints its position, the angle of incidence on the mirror and
+  its clearance from the X-ray beams, and warns when the probe hits the slit blades, grating chip or direct-beam stop.
+- **Known clash.** With the slit 1 mm before the sample and a 300 µm probe at ~42°, the incoming probe hits a slit blade.
+  Ways out: slit further upstream, smaller probe waist, or a plane of incidence along y (χ ≠ 0).
+- **🧊 3D view.** Each beam is a tube through the ellipses spanned by its x and y ray envelopes (2–98 %), plus the
+  optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom. Transverse axes are stretched by
+  an adjustable factor; "around the sample" at ×1 is to scale. An optional ray cloud shows the individual rays.
 
 ## Geometry and assumptions (all are parameters)
 
