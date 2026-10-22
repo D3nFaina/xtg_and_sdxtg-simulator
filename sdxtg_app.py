@@ -114,6 +114,12 @@ def load_params(p: sim.Params):
 if "z_grating" not in ss:
     ss["case"] = "Pink · 4 mm"
     load_params(sim.preset("pink"))
+# Streamlit drops the state of a widget that was not drawn in the previous run (e.g. the probe inputs
+# while the experiment is "X-ray SD"); the widget would then come back at its minimum value. Restore
+# every parameter from the copy saved at the end of the previous run.
+for _k, _v in ss.get("_saved_params", {}).items():
+    if _k not in ss:
+        ss[_k] = _v
 # a click on a scan map / "apply" button stores a pending change, applied before widgets exist
 if ss.get("pending"):
     for k, v in ss.pop("pending").items():
@@ -283,7 +289,10 @@ if ss["experiment"] == "optical":
                  format_func=lambda v: "along the beamline (+z)" if v == "z" else "from the side",
                  help="The probe always travels in the horizontal plane of the X-ray beams (same height), so it "
                       "diffracts in the same plane as the self-diffracted beams.")
-        st.number_input("Probe FWHM on the sample [µm]", 1.0, 5000.0, step=10.0, key="probe_waist_um")
+        st.number_input("Probe waist w₀ on the sample (1/e² radius) [µm]", 1.0, 5000.0, step=5.0, key="probe_waist_um",
+                        help="Gaussian waist of the probe at the sample. FWHM = 1.1774 w₀; the drawings show the FWHM.")
+        st.caption(f"Probe FWHM = {1.17741 * ss['probe_waist_um']:.1f} µm (footprint on the sample is longer along "
+                   f"{ss['split_axis']} by 1/cos φ).")
 
 with sb.expander("Sample and order-selecting slit", expanded=True):
     st.radio("Sample position", ["crossing", "fixed"], key="sample_mode", horizontal=True,
@@ -326,6 +335,7 @@ with sb.expander("Numerics and files", expanded=False):
         st.rerun()
 
 p = current_params()
+ss["_saved_params"] = {k: ss[k] for k in FIELDS + ["bar_phase_pi", "beam_fwhm", "focus_fwhm"] if k in ss}
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -457,8 +467,8 @@ with tab_3d:
     st.caption("Drag to rotate, scroll to zoom towards the rotation centre, **Alt/⌥ + scroll to zoom towards the point "
                "under the cursor** (the rotation centre follows), right-drag to pan, double-click to reset. The view "
                "is kept when you change parameters. Each beam is a tube through "
-               "the ellipses spanned by its ray envelopes (2–98 %) in x and y, so the shapes come from the same rays as "
-               "the x and y views. With an exaggeration other than 1 the transverse axes are stretched and angles look "
+               "its FWHM outline (hard edges where the beamstop or the slit cut it), the same outline as in the 2D "
+               "views, from the same rays. With an exaggeration other than 1 the transverse axes are stretched and angles look "
                "steeper than they are; 'around the sample' at ×1 is to scale.")
 
 
@@ -555,7 +565,7 @@ def probe_at(zpos):
     """Optical probe beams crossing the plane z = zpos: (label, centre µm, FWHM across the plane µm, colour)."""
     if not PROBE_ON:
         return []
-    S, w = GEO["S"], p.probe_waist_um
+    S, w = GEO["S"], p.probe_fwhm_um()
     if abs(zpos - S[2]) < 1e-9:
         return [("optical probe (footprint)", S[0] * 1e6, w / GEO["d_in"][2], s3d.COL["probe"])]
     if zpos < S[2]:
@@ -601,6 +611,20 @@ with tab_bl:
     ymax2 = 1.08 * max([abs(m["det_SD_A_um"]) * 1e-6] + wanted_ext) * 1e6
     elements(fig, 1, 1e3, ymax1, True)
     elements(fig, 2, 1e6, ymax2, False)
+    if PROBE_ON:
+        # the optical probe at its lab position (the axes here are stretched ~1000:1, so a 26° beam is almost
+        # vertical: it crosses this whole window within a few mm of z around the sample; to scale: close-up below)
+        S_ = GEO["S"]
+        for d_, sgn, col_, nm_ in ((GEO["d_in"], -1, s3d.COL["probe"], "optical probe (incoming)"),
+                                   (GEO["d_tr"], 1, s3d.COL["probe"], "transmitted probe"),
+                                   (GEO["d_df"], 1, s3d.COL["probe_d"], "diffracted probe (signal)")):
+            if d_ is None or abs(d_[0]) < 1e-9:
+                continue
+            t_ = 1.2 * ymax2 * 1e-6 / abs(d_[0])            # path length to leave the window
+            P1 = S_ + sgn * t_ * d_
+            fig.add_trace(go.Scatter(x=[S_[2], P1[2]], y=[S_[0] * 1e6, P1[0] * 1e6], mode="lines", name=nm_,
+                                     line=dict(color=col_, width=3, dash="dash" if nm_.startswith("trans") else None),
+                                     legendgroup="probe"), row=2, col=1)
     x0 = z["grating"] - 0.06 * (z["det"] - z["grating"])
     fig.update_xaxes(range=[min(p.z_hm, p.z_vm) - 0.04, z["det"] + 0.03], row=1, col=1, **AX)
     fig.update_xaxes(range=[x0, z["det"] + 0.02 * (z["det"] - x0)], title="z from HM [m]", row=2, col=1, **AX)
@@ -611,7 +635,7 @@ with tab_bl:
     for an in fig.layout.annotations[:2]:          # subplot titles: left-aligned, above the labels
         an.update(x=0, xanchor="left", yshift=22, font=dict(size=14, color=C["ink"]))
     st.plotly_chart(fig, **WIDE)
-    st.caption("Each half-beam is drawn between its own 2 % and 98 % quantiles, from the KB to the CCD, with the same rays "
+    st.caption("Each half-beam is drawn as its FWHM band (11.95 % to 88.05 % quantiles, the same outline as in every other view), from the KB to the CCD, with the same rays "
                "throughout. The green outline before the beamstop meets their outer edges, and the parts of the full beam that "
                "become A and B are tinted. Yellow is the region where A(−1) and B(+1) overlap: the sample has to sit "
                "inside it. Grey bands are the orders the slit has to remove. "
@@ -770,7 +794,54 @@ with tab_pr:
                      legend=dict(orientation="h", y=-0.22, x=0, yanchor="top", font=dict(size=10)))
     f4.update_xaxes(title=None, **AX)
     f4.update_yaxes(title=f"{o_ax} [µm]", **AX)
+    if PROBE_ON:
+        for nm, (qx, qy) in GEO["on_ccd"].items():
+            f4.add_annotation(x=1 if qx > 0 else 0, xref="paper", y=0.98 if qx > 0 else 0.90, yref="paper", text=f"{nm} probe at x = {qx:+.1f} mm →"
+                              if qx > 0 else f"← {nm} probe at x = {qx:+.1f} mm", showarrow=False, xanchor="right"
+                              if qx > 0 else "left", font=dict(size=10, color=s3d.COL["probe_d" if nm == "diffracted"
+                                                                                       else "probe"]))
     c4.plotly_chart(f4, **WIDE)
+    if PROBE_ON:
+        # the whole CCD plane, to scale (mm): chip, X-ray spots and where the optical probes land
+        lam_p = p.probe_wavelength_nm * 1e-9
+        w0 = p.probe_waist_um * 1e-6
+        zR = math.pi * w0 ** 2 / lam_p                          # Rayleigh range of the probe
+        f5 = go.Figure()
+        c0, cw = m.get("ccd_offset_used_mm", p.ccd_offset_mm), p.ccd_width_mm / 2
+        f5.add_shape(type="rect", x0=c0 - cw, x1=c0 + cw, y0=-cw, y1=cw, line=dict(color="#334155", width=1.5),
+                     fillcolor="rgba(51,65,85,0.10)")
+        f5.add_annotation(x=c0, y=cw, text=f"CCD chip {p.ccd_width_mm:g} mm", showarrow=False, yshift=10,
+                          font=dict(size=10, color="#334155"))
+        for key, (x, y) in res.sd.items():
+            col = C["SD"] if key.startswith("SD") else (C["A"] if key.startswith("A") else C["B"])
+            f5.add_trace(go.Scatter(x=[float(np.mean(x)) * 1e3], y=[float(np.mean(y)) * 1e3], mode="markers",
+                                    name=key.replace("_", " ") if key.startswith("SD") else key + " direct (blocked)",
+                                    marker=dict(size=7, color=col, symbol="x" if not key.startswith("SD") else "circle")))
+        th_ = np.linspace(0, 2 * np.pi, 80)
+        for nm, (qx, qy) in GEO["on_ccd"].items():
+            d = GEO["d_tr"] if nm == "transmitted" else GEO["d_df"]
+            L = (p.z_det - GEO["S"][2]) / d[2]                   # path length sample → CCD plane
+            wz = w0 * math.sqrt(1 + (L / zR) ** 2)               # probe radius there (Gaussian beam)
+            fx, fy = 1.17741 * wz / d[2] * 1e3 / 2, 1.17741 * wz * 1e3 / 2   # FWHM/2 on the plane, mm
+            col = s3d.COL["probe_d" if nm == "diffracted" else "probe"]
+            f5.add_trace(go.Scatter(x=qx + fx * np.cos(th_), y=qy + fy * np.sin(th_), mode="lines", fill="toself",
+                                    line=dict(color=col, width=1.5), fillcolor=rgba(col, 0.35),
+                                    name=f"{nm} probe, FWHM {2 * fx * 1e3:.0f} µm"))
+            f5.add_annotation(x=qx, y=qy, text=f"{nm} probe<br>x = {qx:+.1f} mm", showarrow=True, ay=-35,
+                              font=dict(size=10, color=col), arrowcolor=col)
+        xs_ = [c0 - cw, c0 + cw] + [q[0] for q in GEO["on_ccd"].values()]
+        f5.update_layout(title=dict(text=f"CCD plane (z = {p.z_det:.3f} m), to scale: the optical probes miss the X-ray "
+                                         f"chip and go to their own detector" if not any("CCD chip" in o for o in
+                                         GEO["obstacles"]) else "CCD plane: a probe beam lands on the X-ray chip",
+                                    font=dict(size=13)), height=330, **LAYOUT)
+        f5.update_layout(margin=dict(l=50, r=15, t=45, b=45),
+                         legend=dict(orientation="h", y=-0.25, x=0, yanchor="top", font=dict(size=10)))
+        f5.update_xaxes(title=f"{p.split_axis} [mm]", range=[min(xs_) - 6, max(xs_) + 6], **AX)
+        f5.update_yaxes(title=f"{o_ax} [mm]", scaleanchor="x", scaleratio=1, **AX)
+        st.plotly_chart(f5, key="ccd_plane_probe", **WIDE)
+        st.caption(f"Probe beams spread after the sample: Rayleigh range π w₀²/λ = {zR * 1e3:.1f} mm, so at the CCD plane "
+                   f"the {p.probe_waist_um:g} µm waist has grown to the size drawn. The X-ray CCD sees only the SD beams; "
+                   "the diffracted probe is detected with a photodiode outside the chip.")
     st.caption("Profiles along the split axis, with each order weighted by its grating efficiency. Shaded areas are the "
                "slit blades (top left) and the direct-beam stop (bottom left).")
 

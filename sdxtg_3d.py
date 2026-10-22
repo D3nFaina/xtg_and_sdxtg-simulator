@@ -58,7 +58,7 @@ def _shape_tube(z, X, Y, color, name, opacity, exag, show=True):
                      lighting=dict(ambient=0.55, diffuse=0.6, specular=0.2, roughness=0.6))
 
 
-def _contour(R, idx, order, zz, nth=48, q=0.97, max_rays=4000, extra=None, z_ref=None):
+def _contour(R, idx, order, zz, nth=48, q=sim.DRAW_Q2, max_rays=4000, extra=None, z_ref=None):
     """Outline of a ray subset at each z: in nth angular sectors around the centroid, the radius that
     contains a fraction q of the rays. Follows any convex or star-shaped section (round beam, the
     D-shaped half-beams after the beamstop, their images after the focus)."""
@@ -82,7 +82,10 @@ def _contour(R, idx, order, zz, nth=48, q=0.97, max_rays=4000, extra=None, z_ref
         for b in range(nth):
             v = r[a][sec[a] == b]
             if len(v) >= 3:
-                rad[b] = np.quantile(v, q)
+                rq, re_ = np.quantile(v, [q, 0.995])
+                # a Gaussian tail has r(99.5 %) ≈ 2.8 r(50 %); a sector that ends much sooner is cut by a
+                # hard edge (beamstop or slit), and the outline follows that edge, as in the 2D sketches
+                rad[b] = rq if re_ > 1.6 * rq else re_
         ok = np.isfinite(rad)
         if ok.sum() < 3:
             rad[:] = np.nanmax(rad) if ok.any() else 1.0
@@ -169,7 +172,7 @@ def _ccd(zd, off, cw, exag):
     return out
 
 
-def _env(R, idx, order, zz, q=0.02, max_rays=3000, extra=None, z_ref=None):
+def _env(R, idx, order, zz, q=sim.DRAW_Q, max_rays=3000, extra=None, z_ref=None):
     """Ellipse parameters (cx, cy, ax, ay) of a ray subset at the z positions zz."""
     if len(idx) > max_rays:
         idx = np.sort(np.random.default_rng(0).choice(idx, max_rays, replace=False))
@@ -278,7 +281,7 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
                        0.35, exag, True))
     lo, hi = res.slit
     bl, bh = p.slit_blade_len_mm * 1e-3, p.slit_blade_h_mm * 1e-3 / 2
-    ss_, sth, sop, bop = 2.5e-3, th / 4, 0.45, 0.85
+    ss_, sth, sop, bop = 2.5e-3, th / 4, 0.45, (0.85 if full else 0.4)   # see-through: the probe crosses the gap
     lo_out, hi_out = lo - bl, hi + bl
     if close:                                   # clip the elements to the close-up window
         bh, ss_ = min(bh, 0.9 * W), 0.9 * W
@@ -300,7 +303,7 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     probe_full = None
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
         g = sim.probe_geometry(res)
-        rad = p.probe_waist_um * 1e-6 / 2
+        rad = p.probe_fwhm_um() * 1e-6 / 2          # tube radius = FWHM / 2, like the X-ray tubes
         S = g["S"]
         lab = f"probe {p.probe_wavelength_nm:g} nm at φ = {m['probe_angle_used_deg']:.2f}°"
         if full:
@@ -318,10 +321,21 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
                             "steering mirror", exag))
             tr.append(_line(g["mirror"] - 0.04 * g["feed"], g["mirror"], COL["probe"], "probe (feed)", exag, 5,
                             "dot", False))
+            # the probe is ~60 µm across in a view tens of mm wide: draw its axis as a line too, so it stays visible
             tr.append(_cyl(g["mirror"], S, rad, COL["probe"], lab, exag))
+            tr.append(_line(g["mirror"], S, COL["probe"], lab, exag, 4, "solid", False))
             tr.append(_cyl(S, S + Lout * g["d_tr"], rad, COL["probe"], "transmitted probe", exag, opacity=0.35))
+            tr.append(_line(S, S + Lout * g["d_tr"], COL["probe"], "transmitted probe", exag, 2, "dash", False))
             if g["d_df"] is not None:
                 tr.append(_cyl(S, S + Lout * g["d_df"], rad, COL["probe_d"], "diffracted probe (signal)", exag))
+                tr.append(_line(S, S + Lout * g["d_df"], COL["probe_d"], "diffracted probe (signal)", exag, 4,
+                                "solid", False))
+            # where the incoming probe crosses the slit plane: inside the gap
+            qs = S + (z["slit"] - S[2]) / g["d_in"][2] * g["d_in"]
+            tr.append(go.Scatter3d(x=[qs[2] * 1e3], y=[qs[0] * 1e3 * exag], z=[qs[1] * 1e3 * exag], mode="markers+text",
+                                   marker=dict(size=4, color=COL["probe"]), text=["probe through the slit gap"],
+                                   textposition="top center", textfont=dict(size=10, color=COL["probe"]),
+                                   showlegend=False, hoverinfo="text"))
 
     # ── layout ──────────────────────────────────────────────────────────────
     fig = go.Figure(tr)
@@ -339,22 +353,20 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         aspect = dict(x=3.2, y=1, z=1)
         mode = "manual"
         if probe_full is not None:
-            # the axes are stretched, so a lab-frame line would look almost perpendicular to the beam: draw
-            # the probe so that on screen it makes its true angle φ with the beam axis (length 15 % of z)
+            # same lab-frame line as in every other view; the transverse axes are stretched ×exag here, so it
+            # looks steeper than φ (the to-scale views show the true angle)
             g = probe_full
-            zr = (zhi - zlo) * 1e3
-            sz, sy = aspect["x"] / zr, aspect["y"] / (2 * big)       # screen units per mm on each axis
-            Lz = 0.22 * zr
-            zs_ = z["sample"] * 1e3
-            for d, col, nm, w_ in ((-g["d_in"], COL["probe"], f"probe {p.probe_wavelength_nm:g} nm, "
-                                    f"φ = {m['probe_angle_used_deg']:.2f}° (true angle on screen)", 7),
-                                   (g["d_tr"], COL["probe"], "transmitted probe", 3),
-                                   (g["d_df"], COL["probe_d"], "diffracted probe (signal)", 7)):
-                if d is None:
+            S = g["S"]
+            for d, sgn, col, nm, w_ in ((g["d_in"], -1, COL["probe"], f"probe {p.probe_wavelength_nm:g} nm, "
+                                         f"φ = {m['probe_angle_used_deg']:.2f}° (axes stretched ×{exag:g})", 7),
+                                        (g["d_tr"], 1, COL["probe"], "transmitted probe", 3),
+                                        (g["d_df"], 1, COL["probe_d"], "diffracted probe (signal)", 7)):
+                if d is None or abs(d[0]) < 1e-9:
                     continue
-                tz = d[2] / abs(d[2]) * Lz
-                ty = math.tan(math.atan2(d[0], abs(d[2]))) * abs(tz) * sz / sy
-                tr.append(go.Scatter3d(x=[zs_, zs_ + tz], y=[0, ty], z=[0, 0], mode="lines", name=nm,
+                t_ = 0.95 * big / exag * 1e-3 / abs(d[0])          # path length to the edge of the view
+                P1 = S + sgn * t_ * d
+                tr.append(go.Scatter3d(x=[S[2] * 1e3, P1[2] * 1e3], y=[S[0] * 1e3 * exag, P1[0] * 1e3 * exag],
+                                       z=[S[1] * 1e3 * exag, P1[1] * 1e3 * exag], mode="lines", name=nm,
                                        line=dict(color=col, width=w_, dash="dash" if w_ == 3 else None),
                                        hoverinfo="name"))
             fig = go.Figure(tr)
@@ -392,7 +404,7 @@ def figure_probe_2d(res: sim.Result, plane="xz"):
     Lout = max(0.03, 1.2 * p.probe_mirror_dist_mm * 1e-3)
     zlo = min(g["mirror"][2], p.z_grating) - 0.008
     zhi = zs + Lout * 0.9
-    # X-ray beams A(-1), B(+1): 2-98 % bands
+    # X-ray beams A(-1), B(+1): FWHM bands, as in every other view
     for b in res.bundles:
         if not b.wanted:
             continue
@@ -402,7 +414,7 @@ def figure_probe_2d(res: sim.Result, plane="xz"):
             v = R.s(zz[:, None], k, b.order)
         else:
             v = np.broadcast_to(R.o(zz[:, None], k), (len(zz), len(k)))
-        lo, hi = np.quantile(v, [0.02, 0.98], axis=1)
+        lo, hi = np.quantile(v, [sim.DRAW_Q, 1 - sim.DRAW_Q], axis=1)
         f.add_trace(go.Scatter(x=np.r_[zz, zz[::-1]] * 1e3 - zs * 1e3, y=np.r_[lo, hi[::-1]] * 1e3, fill="toself",
                                line=dict(width=0), fillcolor=COL[b.beam], opacity=0.55, name=f"X-ray {b.name}"))
 
@@ -543,13 +555,13 @@ def figure_pump_probe(res: sim.Result):
         if len(k) < 5:
             continue
         x = R.s(zz[:, None], k, b.order)
-        lo, hi = np.quantile(x, [0.12, 0.88], axis=1)         # ≈ FWHM band of a Gaussian
+        lo, hi = np.quantile(x, [sim.DRAW_Q, 1 - sim.DRAW_Q], axis=1)   # FWHM band
         band(zz, lo, hi, COL[b.beam], f"X-ray pump {b.name}", 0.45)
         if res.sd_slopes != (0.0, 0.0):
             e = res.sd_extra[0] if b.beam == "A" else res.sd_extra[1]
             z2 = zz[zz >= zs]
             x2 = R.s(z2[:, None], k, b.order) + e * (z2[:, None] - zs)
-            lo2, hi2 = np.quantile(x2, [0.12, 0.88], axis=1)
+            lo2, hi2 = np.quantile(x2, [sim.DRAW_Q, 1 - sim.DRAW_Q], axis=1)
             band(z2, lo2, hi2, COL["SD"], "self-diffracted X-rays", 0.45, show=b.beam == "A")
     # slit blades
     lo, hi = res.slit
@@ -566,7 +578,7 @@ def figure_pump_probe(res: sim.Result):
                            name=f"sample, {p.sample_formula} {d * 1e6:g} µm", hoverinfo="name"))
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
         g = sim.probe_geometry(res)
-        S, hw = g["S"], p.probe_waist_um * 1e-6 / 2
+        S, hw = g["S"], p.probe_fwhm_um() * 1e-6 / 2
 
         def pband(dv, z0, z1, color, name, op, dash=None):
             zv = np.linspace(z0, z1, 60)

@@ -121,7 +121,7 @@ class Params:
     probe_mirror_dist_mm: float = 60.0   # steering mirror → sample distance
     probe_mirror_diam_mm: float = 25.4   # steering mirror diameter (1")
     probe_feed: str = "z"                # probe reaches the mirror travelling along +z ("z") or sideways ("side")
-    probe_waist_um: float = 50.0         # probe FWHM (beam cross-section); must fit the X-ray spot and the slit gap
+    probe_waist_um: float = 50.0         # probe waist w0 (1/e² intensity radius) at the sample; FWHM = 1.1774 w0
     grating_chip_mm: float = 5.0         # grating chip (frame) size, square
     slit_blade_len_mm: float = 10.0      # how far each slit blade reaches out from the opening
     slit_blade_h_mm: float = 10.0        # blade height along the other axis
@@ -162,6 +162,10 @@ class Params:
         if self.profile != "gaussian":
             return v
         return v * {"waist": 1.17741, "d2w": 0.588705}.get(self.beam_size_def, 1.0)
+
+    def probe_fwhm_um(self) -> float:
+        """FWHM (µm) of the optical probe at the sample, from its waist w0 (1/e² radius)."""
+        return 1.17741 * self.probe_waist_um
 
 
 PRESETS = {
@@ -435,6 +439,13 @@ def _unit(v):
     return v / np.linalg.norm(v)
 
 
+# Every drawing (2D sketches, 3D tubes, close-ups, probe bands) shows a beam by the same outline: its
+# FWHM. For a Gaussian the FWHM band of a 1-D projection lies between the 11.95 % and 88.05 % quantiles,
+# and the FWHM ellipse of a 2-D section holds 50 % of the rays. Hard edges (beamstop, slit) stay hard.
+DRAW_Q = 0.1195
+DRAW_Q2 = 0.5
+
+
 def probe_geometry(res: "Result") -> dict:
     """Lab-frame geometry of the optical probe (vectors are (x, y, z), metres; x = split axis).
     The probe hits the sample centre at polar angle φ from the sample normal, azimuth χ; a flat steering
@@ -473,17 +484,17 @@ def probe_geometry(res: "Result") -> dict:
     # the probe has to reach the X-ray spot through the gap of the order-selecting slit (1-D slit, gap in x)
     q = at_plane(S, d_in, z["slit"])
     lo, hi = res.slit
-    w = p.probe_waist_um * 1e-6 / 2                # half width (FWHM / 2) of the probe
+    w = p.probe_fwhm_um() * 1e-6 / 2              # half width (FWHM / 2) of the probe
     wx = w / max(math.cos(phi), 1e-3)              # its half width across a plane z = const
     sig = 2 * wx / 2.3548
     Phi = lambda u: 0.5 * (1 + math.erf(u / math.sqrt(2)))
     T_slit = Phi((hi - q[0]) / sig) - Phi((lo - q[0]) / sig) if M[2] < z["slit"] else 1.0
     gap_half = min(hi, -lo)
     # largest slit → sample distance at which the probe (FWHM) still fits through the gap
-    slit_max = (gap_half - wx) / math.tan(phi) if phi > 1e-6 else (float("inf") if gap_half > wx else -1.0)
+    slit_max = (gap_half - wx) / math.tan(abs(phi)) if abs(phi) > 1e-6 else (float("inf") if gap_half > wx else -1.0)
     if T_slit < 0.9:
         if gap_half <= wx:
-            fix = (f"the probe ({p.probe_waist_um:g} µm FWHM, {2 * wx * 1e6:.0f} µm across the slit plane) is wider than "
+            fix = (f"the probe (w₀ = {p.probe_waist_um:g} µm, FWHM {2 * w * 1e6:.0f} µm, {2 * wx * 1e6:.0f} µm across the slit plane) is wider than "
                    f"the gap ({(hi - lo) * 1e6:.0f} µm): use a smaller probe")
         else:
             fix = f"put the slit at most {slit_max * 1e3:.3f} mm before the sample"
@@ -524,7 +535,22 @@ def probe_geometry(res: "Result") -> dict:
     if clear < 0:
         obst.append(f"the steering mirror ({p.probe_mirror_diam_mm:g} mm) would cut the X-ray beams "
                     f"({-clear * 1e3:.1f} mm overlap): move it further away or use a smaller mirror")
-    return dict(mirror=M, mirror_normal=mn, feed=feed, d_in=d_in, d_tr=d_tr, d_df=d_df, S=S, nrm=nrm,
+    # the mirror has to sit upstream of the slit, otherwise it would stand in the X-ray path between slit and sample
+    if z["slit"] - R_m < zm < S[2] + R_m:
+        obst.append(f"the steering mirror (z = {zm * 1e3:.1f} mm) overlaps the slit–sample gap: at φ = "
+                    f"{math.degrees(phi):.1f}° and {p.probe_mirror_dist_mm:g} mm it cannot be placed; use a smaller angle "
+                    f"or a longer mirror distance")
+    # where the transmitted and diffracted probes cross the CCD plane (they must miss the X-ray chip)
+    on_ccd = {}
+    c0 = m.get("ccd_offset_used_mm", p.ccd_offset_mm) * 1e-3
+    for nm, d in (("transmitted", d_tr), ("diffracted", d_df)):
+        if d is None or d[2] <= 1e-6:
+            continue
+        q = at_plane(S, d, p.z_det)
+        on_ccd[nm] = (q[0] * 1e3, q[1] * 1e3)
+        if abs(q[0] - c0) < p.ccd_width_mm * 1e-3 / 2 + w and abs(q[1]) < p.ccd_width_mm * 1e-3 / 2 + w:
+            obst.append(f"the {nm} probe lands on the CCD chip (x = {q[0] * 1e3:+.1f} mm): block it or change φ")
+    return dict(mirror=M, mirror_normal=mn, feed=feed, d_in=d_in, d_tr=d_tr, d_df=d_df, S=S, nrm=nrm, on_ccd=on_ccd,
                 mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst, slit_max_mm=slit_max * 1e3,
                 slit_T=T_slit, probe_foot_um=(fx, fy),
                 mirror_xyz_mm=(M[0] * 1e3, M[1] * 1e3, M[2] * 1e3))
@@ -1096,7 +1122,7 @@ def _detector(res: Result, wA, wB, sA, sB):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Beam-size tracking along z
 # ─────────────────────────────────────────────────────────────────────────────
-def sd_envelope(res: Result, nz=60, q=0.02):
+def sd_envelope(res: Result, nz=60, q=DRAW_Q):
     """Envelopes of the self-diffracted beams from the sample to the CCD."""
     R, z_s, zd = res.rays, res.z["sample"], res.z["det"]
     wA = next(b for b in res.bundles if b.beam == "A" and b.wanted)
@@ -1112,7 +1138,7 @@ def sd_envelope(res: Result, nz=60, q=0.02):
     return out
 
 
-def overlap_region(res: Result, nz=120, q=0.02):
+def overlap_region(res: Result, nz=120, q=DRAW_Q):
     """(z, lo, hi) of the region where the q..1-q bands of A(-1) and B(+1) intersect: the
     'rhombus' in which a transient grating exists.  Empty arrays if they never overlap."""
     R, p = res.rays, res.p
@@ -1170,8 +1196,8 @@ def size_vs_z(res: Result, nz=300):
     return out
 
 
-def envelopes(res: Result, nz=160, q=0.02, max_rays=6000):
-    """(name, tag, z, lo, hi, wanted) envelopes in the split axis for the sketch.
+def envelopes(res: Result, nz=160, q=DRAW_Q, max_rays=6000):
+    """(name, tag, z, lo, hi, wanted) envelopes in the split axis for the sketch (FWHM bands, q = DRAW_Q).
 
     Each half-beam is drawn between its own q / 1-q quantile on the outside and its beamstop
     shadow (0.2 % quantile) on the inside, from the KB all the way to the CCD, using the SAME
