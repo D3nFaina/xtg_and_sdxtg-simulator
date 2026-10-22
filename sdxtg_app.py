@@ -99,7 +99,7 @@ def rgba(hex_, a):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Parameters <-> session state
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "2026-10-22 r11"           # shown in the sidebar, to check which code is running
+APP_VERSION = "2026-10-22 r12"           # shown in the sidebar, to check which code is running
 FIELDS = [f.name for f in sim.dataclasses.fields(sim.Params)]
 ss = st.session_state
 
