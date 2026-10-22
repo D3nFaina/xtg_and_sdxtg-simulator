@@ -134,7 +134,7 @@ class Params:
     sample_thickness_nm: float = 10000.0
     xray_atten_nm: float = 159.0         # X-ray attenuation length (1/e of the intensity)
     sample_auto_att: bool = True         # True: L_att from the Henke tables (periodictable) for formula/density
-    slit_upstream_mm: float = 0.2        # slit distance upstream of the sample
+    slit_upstream_mm: float = 0.15       # slit distance upstream of the sample (the probe must fit through the gap)
     slit_auto: bool = True               # open the slit just around the wanted orders
     slit_width_um: float = 300.0         # manual slit width (centered on axis)
     slit_margin_um: float = 10.0         # extra opening on each side in auto mode
@@ -440,10 +440,12 @@ def _unit(v):
 
 
 # Every drawing (2D sketches, 3D tubes, close-ups, probe bands) shows a beam by the same outline: its
-# FWHM. For a Gaussian the FWHM band of a 1-D projection lies between the 11.95 % and 88.05 % quantiles,
-# and the FWHM ellipse of a 2-D section holds 50 % of the rays. Hard edges (beamstop, slit) stay hard.
-DRAW_Q = 0.1195
-DRAW_Q2 = 0.5
+# 1/e² radius w, the same definition as the beam size (waist w0) in the inputs. For a Gaussian the ±w band
+# of a 1-D projection lies between the 2.275 % and 97.725 % quantiles, and the 1/e² ellipse of a 2-D section
+# holds 1 − e⁻² = 86.47 % of the rays. (The FWHM = 1.177 w would not do: the beamstop after the KB is wider
+# than the FWHM, so A and B lie entirely outside the full beam's FWHM.) Hard edges (beamstop, slit) stay hard.
+DRAW_Q = 0.02275
+DRAW_Q2 = 0.8647
 
 
 def probe_geometry(res: "Result") -> dict:
@@ -484,17 +486,17 @@ def probe_geometry(res: "Result") -> dict:
     # the probe has to reach the X-ray spot through the gap of the order-selecting slit (1-D slit, gap in x)
     q = at_plane(S, d_in, z["slit"])
     lo, hi = res.slit
-    w = p.probe_fwhm_um() * 1e-6 / 2              # half width (FWHM / 2) of the probe
+    w = p.probe_waist_um * 1e-6                    # 1/e² radius of the probe (as drawn)
     wx = w / max(math.cos(phi), 1e-3)              # its half width across a plane z = const
-    sig = 2 * wx / 2.3548
+    sig = wx / 2
     Phi = lambda u: 0.5 * (1 + math.erf(u / math.sqrt(2)))
     T_slit = Phi((hi - q[0]) / sig) - Phi((lo - q[0]) / sig) if M[2] < z["slit"] else 1.0
     gap_half = min(hi, -lo)
-    # largest slit → sample distance at which the probe (FWHM) still fits through the gap
+    # largest slit → sample distance at which the probe (1/e² radius) still fits through the gap
     slit_max = (gap_half - wx) / math.tan(abs(phi)) if abs(phi) > 1e-6 else (float("inf") if gap_half > wx else -1.0)
     if T_slit < 0.9:
         if gap_half <= wx:
-            fix = (f"the probe (w₀ = {p.probe_waist_um:g} µm, FWHM {2 * w * 1e6:.0f} µm, {2 * wx * 1e6:.0f} µm across the slit plane) is wider than "
+            fix = (f"the probe (w₀ = {p.probe_waist_um:g} µm, {2 * wx * 1e6:.0f} µm across the slit plane) is wider than "
                    f"the gap ({(hi - lo) * 1e6:.0f} µm): use a smaller probe")
         else:
             fix = f"put the slit at most {slit_max * 1e3:.3f} mm before the sample"
@@ -502,10 +504,10 @@ def probe_geometry(res: "Result") -> dict:
                     f"before the sample the probe is at x = {q[0] * 1e3:+.3f} mm, the gap is {lo * 1e3:+.3f} … "
                     f"{hi * 1e3:+.3f} mm; {fix}")
     # overlap with the X-ray spot at the sample (footprint of the probe vs FWHM of A(-1)/B(+1))
-    fx, fy = 2 * wx * 1e6, 2 * w * 1e6
+    fx, fy = 1.17741 * wx * 1e6, 1.17741 * w * 1e6          # FWHM footprint, compared with the X-ray FWHM
     xs_, ys_ = m.get("fwhm_A_s_um", float("nan")), m.get("fwhm_A_o_um", float("nan"))
     if fx > xs_ or fy > ys_:
-        obst.append(f"the probe footprint ({fx:.0f} × {fy:.0f} µm) is larger than the X-ray spot ({xs_:.0f} × {ys_:.0f} µm "
+        obst.append(f"the probe FWHM footprint ({fx:.0f} × {fy:.0f} µm) is larger than the X-ray spot ({xs_:.0f} × {ys_:.0f} µm "
                     f"FWHM): part of the probe misses the grating")
     # grating chip
     if M[2] < p.z_grating < S[2]:
@@ -1196,42 +1198,45 @@ def size_vs_z(res: Result, nz=300):
     return out
 
 
-def envelopes(res: Result, nz=160, q=DRAW_Q, max_rays=6000):
-    """(name, tag, z, lo, hi, wanted) envelopes in the split axis for the sketch (FWHM bands, q = DRAW_Q).
+def beam_edges(R, zz, k_edge, order, q=DRAW_Q, qi=0.002, fidx=None):
+    """Split-axis outline (lo, hi) of a beam made of the rays k_edge, at the positions zz ((Z,1) array).
+    The outline is the FULL beam's 1/e² band (radius w, like the input beam size) (same rays, same grating order), cut by the hard edges of the
+    subset k_edge (its 0.2 % / 99.8 % quantiles: beamstop shadow, slit). So A and B are exactly the two parts
+    of the full beam on either side of the beamstop, and stay continuous with it at the beamstop and the
+    grating. Used by the 2D sketch and, through the same rule, by the 3D tubes."""
+    fidx = R.full_idx if fidx is None else fidx
+    flo, fhi = np.quantile(R.s(zz, fidx, order), [q, 1 - q], axis=1)
+    alo, ahi = np.quantile(R.s(zz, k_edge, order), [qi, 1 - qi], axis=1)
+    lo, hi = np.clip(flo, alo, ahi), np.clip(fhi, alo, ahi)
+    return lo, hi
 
-    Each half-beam is drawn between its own q / 1-q quantile on the outside and its beamstop
-    shadow (0.2 % quantile) on the inside, from the KB all the way to the CCD, using the SAME
-    rays in every segment, so its outline is continuous through the beamstop and the grating.
-    Upstream of the beamstop the green full beam is drawn so that its edges coincide with the
-    outer edges of A and B, and the parts of it that will become A and B are tinted.
+
+def envelopes(res: Result, nz=160, q=DRAW_Q, max_rays=6000):
+    """(name, tag, z, lo, hi, wanted) envelopes in the split axis for the sketch (1/e² bands, q = DRAW_Q).
+
+    The full beam is drawn as its 1/e² band. Each half-beam is the part of that band on its side of the
+    beamstop shadow (beam_edges), from the KB all the way to the CCD, with the same rays in every segment,
+    so A and B join the full beam without a step at the beamstop and at the grating.
     """
     R, p, zp = res.rays, res.p, res.z
     rng = np.random.default_rng(0)
     sub = lambda idx: idx if len(idx) <= max_rays else np.sort(rng.choice(idx, max_rays, replace=False))
+    fidx = sub(R.full_idx)
     env = []
     z0 = np.linspace(min(p.z_hm, p.z_vm) - 0.05, p.z_bs, nz // 3)[:, None]
-    flo, fhi = np.quantile(R.s(z0, sub(R.full_idx)), [q, 1 - q], axis=1)
-    qi = 0.002                                       # inner edge = beamstop shadow
-    levels, rays = {}, {}
+    flo, fhi = np.quantile(R.s(z0, fidx), [q, 1 - q], axis=1)
+    rays = {}
     for beam in ("A", "B"):
         b0 = next((b for b in res.bundles if b.beam == beam), None)
-        if b0 is None or len(b0.idx) < 5:
-            continue
-        levels[beam] = [qi, 1 - q] if beam == "A" else [q, 1 - qi]
-        rays[beam] = sub(b0.idx)
-    pre = {}
-    for beam in levels:
-        pre[beam] = np.quantile(R.s(z0, rays[beam]), levels[beam], axis=1)
-    if "A" in pre:
-        fhi = np.maximum(fhi, pre["A"][1])
-    if "B" in pre:
-        flo = np.minimum(flo, pre["B"][0])
+        if b0 is not None and len(b0.idx) >= 5:
+            rays[beam] = sub(b0.idx)
     env.append(("full", "full", z0[:, 0], flo, fhi, True))
-    for beam in pre:
-        env.append((beam + " (upstream)", beam, z0[:, 0], pre[beam][0], pre[beam][1], False))
+    for beam, k in rays.items():
+        lo, hi = beam_edges(R, z0, k, 0, q, fidx=fidx)
+        env.append((beam + " (upstream)", beam, z0[:, 0], lo, hi, False))
     zsplit = np.linspace(p.z_bs, p.z_grating, nz // 3)[:, None]
-    for beam in levels:
-        lo, hi = np.quantile(R.s(zsplit, rays[beam]), levels[beam], axis=1)
+    for beam, k in rays.items():
+        lo, hi = beam_edges(R, zsplit, k, 0, q, fidx=fidx)
         env.append((beam, beam, zsplit[:, 0], lo, hi, True))
     if "slit" not in zp:
         return env
@@ -1239,20 +1244,18 @@ def envelopes(res: Result, nz=160, q=DRAW_Q, max_rays=6000):
     z2 = np.linspace(zp["slit"], zp["dbs"], nz // 3)[:, None]
     z3 = np.linspace(zp["dbs"], zp["det"], nz // 4)[:, None]
     for b in res.bundles:
-        if b.beam not in levels:
+        if b.beam not in rays:
             continue
-        lv = levels[b.beam]
         tag = b.beam if b.wanted else "other"
         k = rays[b.beam]
-        lo, hi = np.quantile(R.s(z1, k, b.order), lv, axis=1)
+        lo, hi = beam_edges(R, z1, k, b.order, q, fidx=fidx)
         env.append((b.name, tag, z1[:, 0], lo, hi, b.wanted))
         kp = sub(b.idx[b.slit_mask])
         if len(kp) > 20:
-            lv2 = lv if b.wanted else [q, 1 - q]
-            lo, hi = np.quantile(R.s(z2, kp, b.order), lv2, axis=1)
+            lo, hi = beam_edges(R, z2, kp, b.order, q, fidx=fidx)
             env.append((b.name, tag, z2[:, 0], lo, hi, b.wanted))
             if b.wanted:                     # stopped by the direct-beam beamstop: draw faint
-                lo, hi = np.quantile(R.s(z3, kp, b.order), lv, axis=1)
+                lo, hi = beam_edges(R, z3, kp, b.order, q, fidx=fidx)
                 env.append((b.name + " (blocked)", tag, z3[:, 0], lo, hi, False))
     return env
 

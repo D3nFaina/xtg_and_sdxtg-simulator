@@ -132,7 +132,7 @@ python sdxtg_app.py
   its clearance from the X-ray beams, and warns when the probe hits the slit blades, grating chip or direct-beam stop.
 - **Probe through the slit.** The probe has to overlap A(−1) and B(+1) on the sample, so it passes through the gap
   of the order-selecting slit. The app gives the fraction of the probe that passes and the largest slit → sample
-  distance for it: ≈ 0.25 mm at Λ = 450 nm (400 nm probe at 26°, waist w₀ = 50 µm, FWHM 59 µm); the default slit is 0.2 mm upstream.
+  distance for it: ≈ 0.20 mm (pink) and 0.16 mm (mono) at Λ = 450 nm (400 nm probe at 26°, waist w₀ = 50 µm, which must fit the gap); the default slit is 0.15 mm upstream.
   It also flags a probe footprint larger than the X-ray spot.
 - **Probe angle and overlap.** The probe is set to the phase-matching angle
   sin φ_B = λ_probe/(2Λ) = (λ_probe/λ_X)·sin(θ/2), θ = pump crossing angle (e.g. 400 nm probe, Λ = 452 nm:
@@ -141,7 +141,7 @@ python sdxtg_app.py
   at −φ_B and the SD beams. Every view draws the same lab-frame probe line from `probe_geometry`; in the long
   views the transverse axes are stretched, so the probe looks steeper there than its true angle, and it lands
   far outside the X-ray CCD (the CCD-plane panel in the Slit · sample · CCD tab shows where).
-- **🧊 3D view.** Each beam is a tube through its FWHM outline (hard edges where the beamstop or slit cut it), plus the
+- **🧊 3D view.** Each beam is a tube through its 1/e² outline (hard edges where the beamstop or slit cut it), plus the
   optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom, Alt/⌥ + scroll to zoom towards the cursor; the view is kept between runs. Transverse axes are stretched by
   an adjustable factor; "around the sample" at ×1 is to scale. An optional ray cloud shows the individual rays.
 
@@ -169,9 +169,13 @@ python sdxtg_app.py
   **Each focal length is measured from its own mirror**, so both foci are at z = 2.0 m, where the CCD is.
   If f_V is meant from the HM instead, set f_V = 1.0.
 * **One outline for every view.** All drawings (beamline sketch, 3D tubes, close-ups, probe bands, CCD plane) show
-  each beam by its FWHM: the 11.95–88.05 % quantiles of the rays in 1-D, the 50 % contour in 2-D, with hard edges
-  where the beamstop or slit cut the beam. The probe size is its waist w₀ (1/e² radius, default 50 µm), drawn as
-  FWHM = 1.177 w₀; after the sample it spreads with the Rayleigh range π w₀²/λ.
+  each beam by its 1/e² radius w, the same definition as the beam-size inputs (waist w₀): the 2.3–97.7 %
+  quantiles of the rays in 1-D, the 86.5 % contour in 2-D. A and B are the parts of the full beam's outline on
+  either side of the beamstop shadow (and the slit edges), so they join the full beam without a step. The FWHM
+  would not work as an outline: the beamstop after the KB is wider than the beam FWHM there, so A and B lie
+  entirely outside it. The probe (waist w₀, default 50 µm) is drawn at w₀ too; after the sample it spreads with
+  the Rayleigh range π w₀²/λ. `python check_views.py` verifies the probe angle in every view and the continuity
+  of the beams, and is run before every release.
 * Focal spot 40 µm FWHM in both axes. The diffraction limit at 2.33 nm is about 1 µm, so the 40 µm (source size,
   mirror errors) is an input.
 * Input beam before the KB is round and Gaussian, 4 mm (pink) or 1 mm (mono) **waist w₀ (1/e² radius)**, so FWHM =
@@ -276,7 +280,7 @@ In optical mode (j)–(l) are the A(−1) angle to the normal, the probe Bragg a
 * The beamstop after the KB has to be **wider than the beam FWHM at its position (about 1.3–1.5×) with an
   amplitude grating**. Otherwise the zero orders leak through the slit for every grating setting. That pushes A and B
   into the beam tails, so the TG contrast is only about 0.25 for partially coherent SASE (coh_ratio = 2.7).
-* Presets (amplitude grating, waist w₀ = 4 / 1 mm, Λ target 400–500 nm, setpoint 450 nm, slit 0.2 mm before the
+* Presets (amplitude grating, waist w₀ = 4 / 1 mm, Λ target 400–500 nm, setpoint 450 nm, slit 0.15 mm before the
   sample): pink: beamstop 3.5 mm at 1.0 m, grating 1.35 m, p = 5481 nm (solved) → sample 1.893 m, A(−1)/B(+1) at
   ∓2.58 mrad (∓0.148°) to the normal, overlap region 58 mm, contrast 0.25, order separation at the slit 24 µm.
   Mono: beamstop 0.88 mm, grating 1.50 m, p = 1138 nm → sample 1.605 m, ∓2.59 mrad, contrast 0.25. A 400 nm probe

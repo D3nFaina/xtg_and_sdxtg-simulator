@@ -82,10 +82,7 @@ def _contour(R, idx, order, zz, nth=48, q=sim.DRAW_Q2, max_rays=4000, extra=None
         for b in range(nth):
             v = r[a][sec[a] == b]
             if len(v) >= 3:
-                rq, re_ = np.quantile(v, [q, 0.995])
-                # a Gaussian tail has r(99.5 %) ≈ 2.8 r(50 %); a sector that ends much sooner is cut by a
-                # hard edge (beamstop or slit), and the outline follows that edge, as in the 2D sketches
-                rad[b] = rq if re_ > 1.6 * rq else re_
+                rad[b] = np.quantile(v, q)          # hard edges are applied by _beam_contour
         ok = np.isfinite(rad)
         if ok.sum() < 3:
             rad[:] = np.nanmax(rad) if ok.any() else 1.0
@@ -95,6 +92,16 @@ def _contour(R, idx, order, zz, nth=48, q=sim.DRAW_Q2, max_rays=4000, extra=None
         X[a] = cx[a] + rad * np.cos(th) * sx[a, 0]
         Y[a] = cy[a] + rad * np.sin(th) * sy[a, 0]
     return X, Y
+
+
+def _beam_contour(R, k_edge, order, zz, nth=48):
+    """Outline of a half-beam (or one of its orders): the full beam's 1/e² outline with the same grating
+    order, cut along the split axis by the hard edges of the rays k_edge (beamstop shadow, slit), with the
+    same rule as sim.beam_edges for the 2D sketch. A and B are therefore exactly the two parts of the full
+    beam on either side of the beamstop: no step at the beamstop or at the grating."""
+    X, Y = _contour(R, R.full_idx, order, zz, nth=nth)
+    lo, hi = np.quantile(R.s(zz[:, None], k_edge, order), [0.002, 0.998], axis=1)
+    return np.clip(X, lo[:, None], hi[:, None]), Y
 
 
 def _box(z0, z1, x0, x1, y0, y1, color, name, opacity, exag, show=False):
@@ -131,7 +138,7 @@ def _disc(center, normal, radius, color, name, exag, n=40):
 
 
 def _cyl(P0, P1, radius, color, name, exag, show=True, opacity=0.85, n=20):
-    """Cylinder (probe beam, FWHM diameter) from P0 to P1, lab (x, y, z) metres."""
+    """Cylinder (probe beam, 1/e² radius w0) from P0 to P1, lab (x, y, z) metres."""
     P0, P1 = np.asarray(P0, float), np.asarray(P1, float)
     ax_ = sim._unit(P1 - P0)
     a = sim._unit(np.cross(ax_, [0, 1, 0]) if abs(ax_[1]) < 0.99 else np.cross(ax_, [1, 0, 0]))
@@ -218,17 +225,17 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     for b in (wA, wB):
         zz = seg(p.z_bs, p.z_grating)
         if zz is not None:
-            tr.append(_shape_tube(zz, *_contour(R, b.idx, 0, zz), COL[b.beam], f"beam {b.beam}", 0.45, exag))
+            tr.append(_shape_tube(zz, *_beam_contour(R, b.idx, 0, zz), COL[b.beam], f"beam {b.beam}", 0.45, exag))
     for b in res.bundles:
         if b.wanted:
             k = b.idx[b.slit_mask]
             zz = seg(p.z_grating, z["slit"])
             if zz is not None:
-                tr.append(_shape_tube(zz, *_contour(R, b.idx, b.order, zz), COL[b.beam], b.name, 0.6, exag,
+                tr.append(_shape_tube(zz, *_beam_contour(R, b.idx, b.order, zz), COL[b.beam], b.name, 0.6, exag,
                                       show=False))
             zz = seg(z["slit"], z["dbs"])
             if zz is not None and len(k) > 5:
-                tr.append(_shape_tube(zz, *_contour(R, k, b.order, zz), COL[b.beam], b.name, 0.75, exag))
+                tr.append(_shape_tube(zz, *_beam_contour(R, k, b.order, zz), COL[b.beam], b.name, 0.75, exag))
         elif show_orders and b.eff > 0.005 and abs(b.order) <= 2:
             zz = seg(p.z_grating, z["slit"])
             if zz is not None:
@@ -303,7 +310,7 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     probe_full = None
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
         g = sim.probe_geometry(res)
-        rad = p.probe_fwhm_um() * 1e-6 / 2          # tube radius = FWHM / 2, like the X-ray tubes
+        rad = p.probe_waist_um * 1e-6                # tube radius = 1/e² radius w0, like the X-ray tubes
         S = g["S"]
         lab = f"probe {p.probe_wavelength_nm:g} nm at φ = {m['probe_angle_used_deg']:.2f}°"
         if full:
@@ -353,22 +360,25 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         aspect = dict(x=3.2, y=1, z=1)
         mode = "manual"
         if probe_full is not None:
-            # same lab-frame line as in every other view; the transverse axes are stretched ×exag here, so it
-            # looks steeper than φ (the to-scale views show the true angle)
+            # the transverse axes are stretched ×exag, so the lab-frame line would look almost perpendicular to
+            # the X-rays. Draw the probe through the sample point at its TRUE angle φ to the beam axis in the
+            # scene as displayed (aspect-normalised units): ty/tz = tan φ · sz/sy. check_views.py verifies this.
             g = probe_full
-            S = g["S"]
+            zr = (zhi - zlo) * 1e3
+            sz, sy = aspect["x"] / zr, aspect["y"] / (2 * big)       # scene units per displayed unit
+            Lz = 0.22 * zr
+            zs_ = z["sample"] * 1e3
             for d, sgn, col, nm, w_ in ((g["d_in"], -1, COL["probe"], f"probe {p.probe_wavelength_nm:g} nm, "
-                                         f"φ = {m['probe_angle_used_deg']:.2f}° (axes stretched ×{exag:g})", 7),
+                                         f"φ = {m['probe_angle_used_deg']:.2f}° (true angle; axes stretched)", 7),
                                         (g["d_tr"], 1, COL["probe"], "transmitted probe", 3),
                                         (g["d_df"], 1, COL["probe_d"], "diffracted probe (signal)", 7)):
-                if d is None or abs(d[0]) < 1e-9:
+                if d is None:
                     continue
-                t_ = 0.95 * big / exag * 1e-3 / abs(d[0])          # path length to the edge of the view
-                P1 = S + sgn * t_ * d
-                tr.append(go.Scatter3d(x=[S[2] * 1e3, P1[2] * 1e3], y=[S[0] * 1e3 * exag, P1[0] * 1e3 * exag],
-                                       z=[S[1] * 1e3 * exag, P1[1] * 1e3 * exag], mode="lines", name=nm,
+                tz = sgn * Lz
+                ty = sgn * math.tan(math.atan2(d[0], d[2])) * Lz * sz / sy
+                tr.append(go.Scatter3d(x=[zs_, zs_ + tz], y=[0, ty], z=[0, 0], mode="lines", name=nm,
                                        line=dict(color=col, width=w_, dash="dash" if w_ == 3 else None),
-                                       hoverinfo="name"))
+                                       hoverinfo="name", meta="probe"))
             fig = go.Figure(tr)
     else:
         mode = "data"
@@ -404,7 +414,7 @@ def figure_probe_2d(res: sim.Result, plane="xz"):
     Lout = max(0.03, 1.2 * p.probe_mirror_dist_mm * 1e-3)
     zlo = min(g["mirror"][2], p.z_grating) - 0.008
     zhi = zs + Lout * 0.9
-    # X-ray beams A(-1), B(+1): FWHM bands, as in every other view
+    # X-ray beams A(-1), B(+1): 1/e² bands, as in every other view
     for b in res.bundles:
         if not b.wanted:
             continue
@@ -535,7 +545,7 @@ def html_3d(fig, region="full", height=740):
 def figure_pump_probe(res: sim.Result):
     """Close-up of the pump-probe overlap in the split (horizontal) plane, to scale (equal axes, µm):
     A(-1), B(+1) and the SD beams from the rays, the slit blades with their gap, the sample, and the
-    optical probe (FWHM band) arriving through the gap at its phase-matched angle, with the transmitted
+    optical probe (1/e² band) arriving through the gap at its phase-matched angle, with the transmitted
     and diffracted probe."""
     p, R, z, m = res.p, res.rays, res.z, res.metrics
     zs = z["sample"]
@@ -555,7 +565,7 @@ def figure_pump_probe(res: sim.Result):
         if len(k) < 5:
             continue
         x = R.s(zz[:, None], k, b.order)
-        lo, hi = np.quantile(x, [sim.DRAW_Q, 1 - sim.DRAW_Q], axis=1)   # FWHM band
+        lo, hi = np.quantile(x, [sim.DRAW_Q, 1 - sim.DRAW_Q], axis=1)   # 1/e² band
         band(zz, lo, hi, COL[b.beam], f"X-ray pump {b.name}", 0.45)
         if res.sd_slopes != (0.0, 0.0):
             e = res.sd_extra[0] if b.beam == "A" else res.sd_extra[1]
@@ -578,7 +588,7 @@ def figure_pump_probe(res: sim.Result):
                            name=f"sample, {p.sample_formula} {d * 1e6:g} µm", hoverinfo="name"))
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
         g = sim.probe_geometry(res)
-        S, hw = g["S"], p.probe_fwhm_um() * 1e-6 / 2
+        S, hw = g["S"], p.probe_waist_um * 1e-6        # 1/e² radius, as for the X-rays
 
         def pband(dv, z0, z1, color, name, op, dash=None):
             zv = np.linspace(z0, z1, 60)

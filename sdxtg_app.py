@@ -475,7 +475,7 @@ with tab_3d:
     st.caption("Drag to rotate, scroll to zoom towards the rotation centre, **Alt/⌥ + scroll to zoom towards the point "
                "under the cursor** (the rotation centre follows), right-drag to pan, double-click to reset. The view "
                "is kept when you change parameters. Each beam is a tube through "
-               "its FWHM outline (hard edges where the beamstop or the slit cut it), the same outline as in the 2D "
+               "its 1/e² outline (radius w, the same definition as the beam size inputs) (hard edges where the beamstop or the slit cut it), the same outline as in the 2D "
                "views, from the same rays. With an exaggeration other than 1 the transverse axes are stretched and angles look "
                "steeper than they are; 'around the sample' at ×1 is to scale.")
 
@@ -620,19 +620,22 @@ with tab_bl:
     elements(fig, 1, 1e3, ymax1, True)
     elements(fig, 2, 1e6, ymax2, False)
     if PROBE_ON:
-        # the optical probe at its lab position (the axes here are stretched ~1000:1, so a 26° beam is almost
-        # vertical: it crosses this whole window within a few mm of z around the sample; to scale: close-up below)
+        # the axes here are stretched ~1000:1, so the probe is drawn as arrows in screen pixels through the
+        # sample point, at its TRUE angle φ to the beam axis (a lab-frame line would look vertical); the
+        # to-scale close-up below shows the real overlap
         S_ = GEO["S"]
-        for d_, sgn, col_, nm_ in ((GEO["d_in"], -1, s3d.COL["probe"], "optical probe (incoming)"),
-                                   (GEO["d_tr"], 1, s3d.COL["probe"], "transmitted probe"),
-                                   (GEO["d_df"], 1, s3d.COL["probe_d"], "diffracted probe (signal)")):
-            if d_ is None or abs(d_[0]) < 1e-9:
+        Lpx = 110
+        for d_, sgn, col_, nm_ in ((GEO["d_in"], -1, s3d.COL["probe"], f"probe {p.probe_wavelength_nm:g} nm, "
+                                    f"φ = {m['probe_angle_used_deg']:.1f}°"),
+                                   (GEO["d_tr"], 1, s3d.COL["probe"], "transmitted"),
+                                   (GEO["d_df"], 1, s3d.COL["probe_d"], "diffracted (signal)")):
+            if d_ is None:
                 continue
-            t_ = 1.2 * ymax2 * 1e-6 / abs(d_[0])            # path length to leave the window
-            P1 = S_ + sgn * t_ * d_
-            fig.add_trace(go.Scatter(x=[S_[2], P1[2]], y=[S_[0] * 1e6, P1[0] * 1e6], mode="lines", name=nm_,
-                                     line=dict(color=col_, width=3, dash="dash" if nm_.startswith("trans") else None),
-                                     legendgroup="probe"), row=2, col=1)
+            nz_, nx_ = d_[2] / math.hypot(d_[0], d_[2]), d_[0] / math.hypot(d_[0], d_[2])
+            fig.add_annotation(x=S_[2], y=S_[0] * 1e6, xref="x2", yref="y2", ax=sgn * Lpx * nz_, ay=-sgn * Lpx * nx_,
+                               showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=3 if sgn < 0 else 2,
+                               arrowcolor=col_, arrowside="end" if sgn < 0 else "start", text=nm_,
+                               font=dict(size=10, color=col_), opacity=0.5 if nm_ == "transmitted" else 1)
     x0 = z["grating"] - 0.06 * (z["det"] - z["grating"])
     fig.update_xaxes(range=[min(p.z_hm, p.z_vm) - 0.04, z["det"] + 0.03], row=1, col=1, **AX)
     fig.update_xaxes(range=[x0, z["det"] + 0.02 * (z["det"] - x0)], title="z from HM [m]", row=2, col=1, **AX)
@@ -643,7 +646,7 @@ with tab_bl:
     for an in fig.layout.annotations[:2]:          # subplot titles: left-aligned, above the labels
         an.update(x=0, xanchor="left", yshift=22, font=dict(size=14, color=C["ink"]))
     st.plotly_chart(fig, **WIDE)
-    st.caption("Each half-beam is drawn as its FWHM band (11.95 % to 88.05 % quantiles, the same outline as in every other view), from the KB to the CCD, with the same rays "
+    st.caption("Each half-beam is drawn as its 1/e² band (2.3 % to 97.7 % quantiles, radius w as for the beam size inputs, the same outline as in every other view), from the KB to the CCD, with the same rays "
                "throughout. The green outline before the beamstop meets their outer edges, and the parts of the full beam that "
                "become A and B are tinted. Yellow is the region where A(−1) and B(+1) overlap: the sample has to sit "
                "inside it. Grey bands are the orders the slit has to remove. "
@@ -652,7 +655,7 @@ with tab_bl:
     if PROBE_ON:
         st.markdown(probe_formula_md())
         st.plotly_chart(s3d.figure_pump_probe(res), key="pp_bl", **WIDE)
-        st.caption("Close-up at true scale (equal axes): the pumps A(−1) and B(+1) (FWHM bands) cross at only "
+        st.caption("Close-up at true scale (equal axes): the pumps A(−1) and B(+1) (1/e² bands) cross at only "
                    f"±{abs(m['angle_A_mrad']):.2f} mrad, so they look parallel; the probe comes in at φ_B through the "
                    "gap of the order-selecting slit and overlaps them on the sample; the diffracted probe (signal) "
                    "leaves at −φ_B, the self-diffracted X-rays continue at ±1.5 θ. The long views above have "
