@@ -99,7 +99,7 @@ def rgba(hex_, a):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Parameters <-> session state
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "2026-10-22 r10"           # shown in the sidebar, to check which code is running
+APP_VERSION = "2026-10-22 r11"           # shown in the sidebar, to check which code is running
 FIELDS = [f.name for f in sim.dataclasses.fields(sim.Params)]
 ss = st.session_state
 
@@ -121,6 +121,11 @@ if "z_grating" not in ss:
 for _k, _v in ss.get("_saved_params", {}).items():
     if _k not in ss:
         ss[_k] = _v
+# re-assigning a key detaches it from its widget, so Streamlit (any version) keeps it even when the widget is
+# hidden in this run
+for _k in FIELDS + ["bar_phase_pi", "beam_fwhm", "focus_fwhm"]:
+    if _k in ss:
+        ss[_k] = ss[_k]
 # a click on a scan map / "apply" button stores a pending change, applied before widgets exist
 if ss.get("pending"):
     for k, v in ss.pop("pending").items():
@@ -337,7 +342,8 @@ with sb.expander("Numerics and files", expanded=False):
         st.rerun()
 
 p = current_params()
-ss["_saved_params"] = {k: ss[k] for k in FIELDS + ["bar_phase_pi", "beam_fwhm", "focus_fwhm"] if k in ss}
+# full copy (every field, taken from p so nothing is missing even if Streamlit already dropped a widget key)
+ss["_saved_params"] = {**sim.asdict(p), **{k: ss[k] for k in ("bar_phase_pi", "beam_fwhm", "focus_fwhm") if k in ss}}
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
