@@ -43,6 +43,57 @@ def _tube(z, cx, cy, ax, ay, color, name, opacity, exag, nth=28, show=True):
                      lighting=dict(ambient=0.55, diffuse=0.6, specular=0.2, roughness=0.6))
 
 
+def _shape_tube(z, X, Y, color, name, opacity, exag, show=True):
+    """Mesh3d tube through arbitrary closed cross-sections: X, Y have shape (len(z), nth), metres."""
+    nz, nth = X.shape
+    Z = np.repeat(z, nth) * 1e3
+    i, j, k = [], [], []
+    for a in range(nz - 1):
+        for b in range(nth):
+            p0, p1 = a * nth + b, a * nth + (b + 1) % nth
+            q0, q1 = p0 + nth, p1 + nth
+            i += [p0, p1]; j += [p1, q1]; k += [q0, q0]
+    return go.Mesh3d(x=Z, y=X.ravel() * 1e3 * exag, z=Y.ravel() * 1e3 * exag, i=i, j=j, k=k, color=color,
+                     opacity=opacity, name=name, flatshading=False, showlegend=show, hoverinfo="name",
+                     lighting=dict(ambient=0.55, diffuse=0.6, specular=0.2, roughness=0.6))
+
+
+def _contour(R, idx, order, zz, nth=48, q=0.97, max_rays=4000, extra=None, z_ref=None):
+    """Outline of a ray subset at each z: in nth angular sectors around the centroid, the radius that
+    contains a fraction q of the rays. Follows any convex or star-shaped section (round beam, the
+    D-shaped half-beams after the beamstop, their images after the focus)."""
+    if len(idx) > max_rays:
+        idx = np.sort(np.random.default_rng(0).choice(idx, max_rays, replace=False))
+    xs = R.s(zz[:, None], idx, order)
+    if extra is not None:
+        xs = xs + extra * (zz[:, None] - z_ref)
+    ys = np.broadcast_to(R.o(zz[:, None], idx), xs.shape)
+    cx, cy = xs.mean(axis=1), ys.mean(axis=1)
+    dx, dy = xs - cx[:, None], ys - cy[:, None]
+    # normalise by the rms size so the sectors are even for very elongated sections
+    sx, sy = dx.std(axis=1)[:, None] + 1e-12, dy.std(axis=1)[:, None] + 1e-12
+    ang = np.arctan2(dy / sy, dx / sx)
+    r = np.hypot(dx / sx, dy / sy)
+    th = np.linspace(-np.pi, np.pi, nth, endpoint=False) + np.pi / nth
+    sec = np.floor((ang + np.pi) / (2 * np.pi) * nth).astype(int) % nth
+    X = np.empty((len(zz), nth)); Y = np.empty((len(zz), nth))
+    for a in range(len(zz)):
+        rad = np.full(nth, np.nan)
+        for b in range(nth):
+            v = r[a][sec[a] == b]
+            if len(v) >= 3:
+                rad[b] = np.quantile(v, q)
+        ok = np.isfinite(rad)
+        if ok.sum() < 3:
+            rad[:] = np.nanmax(rad) if ok.any() else 1.0
+        else:
+            rad = np.interp(np.arange(nth), np.nonzero(ok)[0], rad[ok], period=nth)
+        rad = (np.roll(rad, 1) + 2 * rad + np.roll(rad, -1)) / 4            # light smoothing
+        X[a] = cx[a] + rad * np.cos(th) * sx[a, 0]
+        Y[a] = cy[a] + rad * np.sin(th) * sy[a, 0]
+    return X, Y
+
+
 def _box(z0, z1, x0, x1, y0, y1, color, name, opacity, exag, show=False):
     """Axis-aligned box (m) as Mesh3d."""
     zz = np.array([z0, z1]) * 1e3
@@ -117,15 +168,16 @@ def _env(R, idx, order, zz, q=0.02, max_rays=3000, extra=None, z_ref=None):
 def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_rays=False, nz=48):
     p, R, z, m = res.p, res.rays, res.z, res.metrics
     full = region == "full"
-    D = max(p.beam_fwhm_x_mm, p.beam_fwhm_y_mm) * 1e-3
+    D = max(p.beam_fwhm("x"), p.beam_fwhm("y")) * 1e-3
     if exag is None:
         exag = 100.0 if full else 1.0
     if full:
         zlo, zhi = min(p.z_hm, p.z_vm) - 0.1, p.z_det + 0.07
     else:
-        zlo = p.z_grating - 0.006
+        zlo = z["sample"] - 0.03
         if p.experiment == "optical" and "probe_mirror_z" in m:
             zlo = min(zlo, m["probe_mirror_z"] - 0.01)
+        zlo = max(zlo, p.z_grating - 0.006)
         zhi = min(p.z_det, z["sample"] + max(0.06, 1.2 * (z["dbs"] - z["sample"])))
     tr = []
 
@@ -136,22 +188,23 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     # ── beams ───────────────────────────────────────────────────────────────
     zz = seg(min(p.z_hm, p.z_vm) - 0.1, p.z_bs)
     if zz is not None:
-        tr.append(_tube(zz, *_env(R, R.full_idx, 0, zz), COL["full"], "full beam", 0.35, exag))
+        tr.append(_shape_tube(zz, *_contour(R, R.full_idx, 0, zz), COL["full"], "full beam", 0.35, exag))
     wA = next(b for b in res.bundles if b.beam == "A" and b.wanted)
     wB = next(b for b in res.bundles if b.beam == "B" and b.wanted)
     for b in (wA, wB):
         zz = seg(p.z_bs, p.z_grating)
         if zz is not None:
-            tr.append(_tube(zz, *_env(R, b.idx, 0, zz), COL[b.beam], f"beam {b.beam}", 0.45, exag))
+            tr.append(_shape_tube(zz, *_contour(R, b.idx, 0, zz), COL[b.beam], f"beam {b.beam}", 0.45, exag))
     for b in res.bundles:
         if b.wanted:
             k = b.idx[b.slit_mask]
             zz = seg(p.z_grating, z["slit"])
             if zz is not None:
-                tr.append(_tube(zz, *_env(R, b.idx, b.order, zz), COL[b.beam], b.name, 0.6, exag, show=False))
+                tr.append(_shape_tube(zz, *_contour(R, b.idx, b.order, zz), COL[b.beam], b.name, 0.6, exag,
+                                      show=False))
             zz = seg(z["slit"], z["dbs"])
             if zz is not None and len(k) > 5:
-                tr.append(_tube(zz, *_env(R, k, b.order, zz), COL[b.beam], b.name, 0.75, exag))
+                tr.append(_shape_tube(zz, *_contour(R, k, b.order, zz), COL[b.beam], b.name, 0.75, exag))
         elif show_orders and b.eff > 0.005 and abs(b.order) <= 2:
             zz = seg(p.z_grating, z["slit"])
             if zz is not None:
@@ -164,8 +217,8 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
             k = b.idx[b.slit_mask]
             zz = seg(z["sample"], p.z_det)
             if zz is not None and len(k) > 5:
-                tr.append(_tube(zz, *_env(R, k, b.order, zz, extra=extra, z_ref=z["sample"]), COL["SD"], nm,
-                                0.7, exag, show=nm.endswith("kB")))
+                tr.append(_shape_tube(zz, *_contour(R, k, b.order, zz, extra=extra, z_ref=z["sample"]), COL["SD"],
+                                      nm, 0.7, exag, show=nm.endswith("kB")))
     # ray cloud ("splats")
     if show_rays:
         rng = np.random.default_rng(1)
@@ -182,7 +235,7 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
                                    marker=dict(size=1.6, color=c, opacity=0.25), showlegend=False, hoverinfo="skip"))
 
     # ── elements ────────────────────────────────────────────────────────────
-    th = 0.4e-3 / (1 if full else 1)           # element thickness along z
+    th = 0.4e-3 if full else 0.04e-3            # element thickness along z
     Hy = 1.3 * D if full else max(4e-3, 2 * m.get("fwhm_A_o_um", 300) * 1e-6 * 3)
     if full:
         Lm = 0.3
@@ -232,6 +285,15 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
 
     # ── layout ──────────────────────────────────────────────────────────────
     fig = go.Figure(tr)
+    # same scale on both transverse axes, so a round beam looks round
+    big = 0.0
+    for t_ in tr:
+        for v in (t_.y, t_.z):
+            if v is not None:
+                a_ = np.abs(np.array([u for u in v if u is not None], float))
+                if a_.size:
+                    big = max(big, float(np.nanmax(a_)))
+    big *= 1.05
     if full:
         aspect = dict(x=3.2, y=1, z=1)
         mode = "manual"
@@ -244,9 +306,10 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         scene=dict(
             xaxis=dict(title="z [mm]", backgroundcolor="#F6F8FB", gridcolor="#E6EAF0", range=[zlo * 1e3, zhi * 1e3]),
             yaxis=dict(title=f"x [mm] × {exag:g}" if exag != 1 else "x [mm]", backgroundcolor="#F6F8FB",
+                       range=[-big, big] if full else None,
                        gridcolor="#E6EAF0"),
             zaxis=dict(title=f"y (vertical) [mm] × {exag:g}" if exag != 1 else "y (vertical) [mm]",
-                       backgroundcolor="#F6F8FB",
+                       backgroundcolor="#F6F8FB", range=[-big, big] if full else None,
                        gridcolor="#E6EAF0"),
             aspectmode=mode, aspectratio=aspect,
             camera=dict(eye=dict(x=-1.1, y=-1.6, z=0.9) if full else dict(x=-1.4, y=-1.3, z=0.8),

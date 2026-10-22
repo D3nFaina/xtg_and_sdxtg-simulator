@@ -131,7 +131,7 @@ def _grids(p: sim.Params, res: sim.Result, n_max):
     grid at the sample (resolves the TG fringes)."""
     lam = p.wavelength_nm * 1e-9
     zm, f = sim._axis_geo(p, p.split_axis)
-    D = (p.beam_fwhm_x_mm if p.split_axis == "x" else p.beam_fwhm_y_mm) * 1e-3
+    D = p.beam_fwhm(p.split_axis) * 1e-3
     zf = zm + f
     R_g = zf - p.z_grating
     W1 = 3.2 * D

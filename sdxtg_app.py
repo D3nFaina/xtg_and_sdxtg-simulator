@@ -148,7 +148,13 @@ sb.radio("Experiment", ["sd", "optical"], key="experiment", horizontal=True,
               "Optical probe: the X-ray TG is read by an optical beam at its phase-matching angle; needs Λ > λ_probe/2.")
 
 with sb.expander("Beam before the KB", expanded=False):
-    st.number_input("Beam FWHM at the KB [mm]", 0.1, 10.0, step=0.1, key="beam_fwhm")
+    st.number_input("Beam size at the KB [mm]", 0.1, 10.0, step=0.1, key="beam_fwhm",
+                    help="Round beam, same size in x and y. Its meaning is set below.")
+    st.radio("Beam size is the", ["waist", "d2w", "fwhm"], key="beam_size_def", horizontal=True,
+             format_func=lambda v: {"waist": "waist w₀", "d2w": "1/e² diameter", "fwhm": "FWHM"}[v],
+             help="Gaussian beam: FWHM = 1.177 w₀ = 0.589 × (1/e² diameter).")
+    _pf = current_params()
+    st.caption(f"FWHM used: {_pf.beam_fwhm('x'):.2f} mm")
     st.number_input("Focal spot FWHM [µm]", 1.0, 200.0, step=1.0, key="focus_fwhm")
     st.number_input("Bandwidth ΔE/E FWHM [%]", 0.0, 5.0, step=0.01, format="%.3f", key="bandwidth_pct")
     st.number_input("Pulse energy on the KB [µJ]", 0.1, 5000.0, step=10.0, key="pulse_energy_uJ")
@@ -411,9 +417,11 @@ if p.experiment == "optical":
             f"{(res.z['sample'] - m['probe_mirror_z']) * 1e3:.1f} mm before the sample, same height as the X-rays · "
             f"AOI {m['probe_mirror_aoi_deg']:.1f}° · clears X-rays by {m['probe_mirror_clear_mm']:.1f} mm",
             "good" if m["probe_mirror_clear_mm"] > 0 else "bad")
-        kpi(cols[3], "Probe past the slit", f"slit ≥ {m['probe_slit_min_mm']:.1f} mm",
-            f"needed slit → sample distance for a free probe path; now {p.slit_upstream_mm:g} mm · "
-            f"{int(m['probe_clashes'])} obstacle(s)", "good" if m["probe_clashes"] == 0 else "bad")
+        sm = m["probe_slit_max_mm"]
+        kpi(cols[3], "Probe through the slit gap", f"{m['probe_slit_T'] * 100:.0f} % passes",
+            (f"slit must be ≤ {sm:.3f} mm before the sample for this probe; now {p.slit_upstream_mm:g} mm"
+             if sm > 0 else "probe wider than the slit gap: use a smaller probe")
+            + f" · {int(m['probe_clashes'])} obstacle(s)", "good" if m["probe_clashes"] == 0 else "bad")
 for w in res.warnings:
     st.warning(w, icon="⚠️")
 st.write("")
@@ -633,9 +641,39 @@ with tab_sz:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Profiles
 # ─────────────────────────────────────────────────────────────────────────────
+PROBE_ON = p.experiment == "optical" and "probe_mirror_x_mm" in m
+GEO = sim.probe_geometry(res) if PROBE_ON else None
+
+
+def probe_at(zpos):
+    """Optical probe beams crossing the plane z = zpos: (label, centre µm, FWHM across the plane µm, colour)."""
+    if not PROBE_ON:
+        return []
+    S, w = GEO["S"], p.probe_waist_um
+    if abs(zpos - S[2]) < 1e-9:
+        return [("optical probe (footprint)", S[0] * 1e6, w / GEO["d_in"][2], s3d.COL["probe"])]
+    if zpos < S[2]:
+        if zpos < GEO["mirror"][2]:
+            return []
+        d = GEO["d_in"]
+        return [("optical probe (incoming)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe"])]
+    out = [("transmitted probe", (S[0] + GEO["d_tr"][0] * (zpos - S[2]) / GEO["d_tr"][2]) * 1e6, w / GEO["d_tr"][2],
+            s3d.COL["probe"])]
+    if GEO["d_df"] is not None:
+        d = GEO["d_df"]
+        out.append(("diffracted probe (signal)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe_d"]))
+    return out
+
+
 def profile_fig(zpos, bins, masked, title, shade=None, shade_inside=False, sd=False, height=360):
     R = res.rays
     f = go.Figure()
+    pr = probe_at(zpos)
+    if pr and abs(zpos - z["sample"]) > 1e-9:          # widen the window so the probe is in view (up to 5 mm)
+        xs_ = [c for _, c, _, _ in pr if abs(c) < 5000]
+        if xs_:
+            lo_, hi_ = min(bins[0], min(xs_) - 150), max(bins[-1], max(xs_) + 150)
+            bins = np.linspace(lo_, hi_, max(len(bins), 400))
     centers = 0.5 * (bins[1:] + bins[:-1])
     for b in res.bundles:
         k = b.idx[b.slit_mask] if masked else b.idx
@@ -659,6 +697,17 @@ def profile_fig(zpos, bins, masked, title, shade=None, shade_inside=False, sd=Fa
             f.add_trace(go.Scatter(x=centers, y=h, name=nm.replace("_", " "), mode="lines",
                                    line=dict(color=C["SD"], width=2.2, shape="spline"),
                                    fill="tozeroy", fillcolor=rgba(C["SD"], 0.12)))
+    if pr:
+        top = max([max(tr.y) for tr in f.data if tr.y is not None and len(tr.y)] + [1e-30])
+        for i_, (lab, c, fw, col) in enumerate(pr):
+            if abs(c) < 5000:
+                xx = np.linspace(bins[0], bins[-1], 600)
+                f.add_trace(go.Scatter(x=xx, y=top * np.exp(-4 * math.log(2) * ((xx - c) / fw) ** 2), name=lab,
+                                       mode="lines", line=dict(color=col, width=2.2, dash="dash")))
+            else:
+                f.add_annotation(x=bins[0] if c < 0 else bins[-1], y=top * (0.55 - 0.15 * i_), text=f"{lab} at x = {c / 1e3:+.1f} mm",
+                                 showarrow=True, ax=60 if c < 0 else -60, ay=0, font=dict(size=10, color=col),
+                                 arrowcolor=col)
     if shade is not None:
         lo, hi = shade[0] * 1e6, shade[1] * 1e6
         if shade_inside:
@@ -946,7 +995,7 @@ with tab_sc:
         y_lo, y_hi = cc[1].slider("Grating period range [nm] (log grid)", 5.0, 20000.0,
                                   (max(d_lo, 5.0), min(max(d_hi, d_lo + 10), 20000.0)), step=1.0)
     else:
-        D = p.beam_fwhm_x_mm if p.split_axis == "x" else p.beam_fwhm_y_mm
+        D = p.beam_fwhm(p.split_axis)
         y_lo, y_hi = cc[1].slider("Beamstop width range [mm]", 0.0, 8.0,
                                   (round(0.3 * D, 2), round(min(1.6 * D, 8.0), 2)), step=0.01)
     nz = cc[2].number_input("z points", 10, 250, 90, step=10)

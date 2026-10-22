@@ -63,8 +63,9 @@ class Params:
     # source / beam right before the KB
     wavelength_nm: float = 2.33          # O K-edge (~532 eV)
     bandwidth_pct: float = 0.5           # dE/E FWHM in %
-    beam_fwhm_x_mm: float = 4.0
+    beam_fwhm_x_mm: float = 4.0          # input beam size at the KB, meaning set by beam_size_def
     beam_fwhm_y_mm: float = 4.0
+    beam_size_def: str = "waist"         # "waist" = w0 (1/e² radius), "d2w" = 1/e² diameter, "fwhm"
     profile: str = "gaussian"            # "gaussian" | "flattop"
     pulse_energy_uJ: float = 100.0       # on the KB (for absolute fluence), set your value
     # transverse coherence (Gaussian Schell model) of the beam on the KB, split axis:
@@ -98,13 +99,13 @@ class Params:
     max_order: int = 3
     # target transient-grating period: settings whose TG period falls outside
     # [tg_min_nm, tg_max_nm] (with tg_tol_pct tolerance) are discarded; min == max = one exact period
-    tg_min_nm: float = 20.0
-    tg_max_nm: float = 300.0
+    tg_min_nm: float = 400.0
+    tg_max_nm: float = 500.0
     tg_tol_pct: float = 2.0
     # "target": the grating period is solved so that the TG period equals tg_set_nm;
     # "manual": period_nm is used as given
     period_mode: str = "target"
-    tg_set_nm: float = 50.0
+    tg_set_nm: float = 450.0
 
     # sample / slit / detector
     sample_mode: str = "crossing"        # "crossing" | "fixed"
@@ -120,7 +121,7 @@ class Params:
     probe_mirror_dist_mm: float = 60.0   # steering mirror → sample distance
     probe_mirror_diam_mm: float = 25.4   # steering mirror diameter (1")
     probe_feed: str = "z"                # probe reaches the mirror travelling along +z ("z") or sideways ("side")
-    probe_waist_um: float = 300.0        # probe FWHM on the sample (drawing and overlap only)
+    probe_waist_um: float = 50.0         # probe FWHM (beam cross-section); must fit the X-ray spot and the slit gap
     grating_chip_mm: float = 5.0         # grating chip (frame) size, square
     slit_blade_len_mm: float = 10.0      # how far each slit blade reaches out from the opening
     slit_blade_h_mm: float = 10.0        # blade height along the other axis
@@ -133,7 +134,7 @@ class Params:
     sample_thickness_nm: float = 10000.0
     xray_atten_nm: float = 159.0         # X-ray attenuation length (1/e of the intensity)
     sample_auto_att: bool = True         # True: L_att from the Henke tables (periodictable) for formula/density
-    slit_upstream_mm: float = 1.0        # slit distance upstream of the sample
+    slit_upstream_mm: float = 0.2        # slit distance upstream of the sample
     slit_auto: bool = True               # open the slit just around the wanted orders
     slit_width_um: float = 300.0         # manual slit width (centered on axis)
     slit_margin_um: float = 10.0         # extra opening on each side in auto mode
@@ -154,15 +155,23 @@ class Params:
     def copy(self, **kw) -> "Params":
         return dataclasses.replace(self, **kw)
 
+    def beam_fwhm(self, ax: str) -> float:
+        """FWHM (mm) of the input beam along x or y, from the size and its definition (Gaussian beam:
+        FWHM = sqrt(2 ln 2) w0 = 1.1774 w0)."""
+        v = self.beam_fwhm_x_mm if ax == "x" else self.beam_fwhm_y_mm
+        if self.profile != "gaussian":
+            return v
+        return v * {"waist": 1.17741, "d2w": 0.588705}.get(self.beam_size_def, 1.0)
+
 
 PRESETS = {
     # bandwidth and pulse energy are placeholders: put in the PAL-XFEL values for your run
     # beamstop / grating values are starting points found with the correlation scan
     "pink": dict(beam_fwhm_x_mm=4.0, beam_fwhm_y_mm=4.0, bandwidth_pct=0.5, pulse_energy_uJ=100.0,
-                 z_bs=1.0, bs_width_mm=3.0, z_grating=1.80, period_nm=108.6, tg_set_nm=50.0,
+                 z_bs=1.0, bs_width_mm=3.5, z_grating=1.35, period_nm=5480.6, tg_set_nm=450.0,
                  dbs_after_sample_mm=50.0),
     "mono": dict(beam_fwhm_x_mm=1.0, beam_fwhm_y_mm=1.0, bandwidth_pct=0.02, pulse_energy_uJ=10.0,
-                 z_bs=1.0, bs_width_mm=0.75, z_grating=1.45, period_nm=102.0, tg_set_nm=50.0,
+                 z_bs=1.0, bs_width_mm=0.88, z_grating=1.50, period_nm=1138.2, tg_set_nm=450.0,
                  dbs_after_sample_mm=100.0),
 }
 
@@ -461,19 +470,32 @@ def probe_geometry(res: "Result") -> dict:
         return P0 + t * d
     obst = []
     # slit blades (in x beyond the opening, |y| < h/2)
+    # the probe has to reach the X-ray spot through the gap of the order-selecting slit (1-D slit, gap in x)
     q = at_plane(S, d_in, z["slit"])
     lo, hi = res.slit
-    bl, bh = p.slit_blade_len_mm * 1e-3, p.slit_blade_h_mm * 1e-3 / 2
     w = p.probe_waist_um * 1e-6 / 2                # half width (FWHM / 2) of the probe
     wx = w / max(math.cos(phi), 1e-3)              # its half width across a plane z = const
-    edge = abs(lo if q[0] < 0 else hi)             # slit edge on the probe side
-    # slit distance at which the probe passes beyond the outer end of the blade
-    slit_min = (edge + bl + wx) / math.tan(phi) if phi > 1e-6 else float("inf")
-    if M[2] < z["slit"] and abs(q[1]) - w < bh and ((lo - bl < q[0] + wx and q[0] - wx < lo)
-                                                   or (hi < q[0] + wx and q[0] - wx < hi + bl)):
-        obst.append(f"the incoming probe hits a slit blade ({(z['sample'] - z['slit']) * 1e3:.1f} mm before the "
-                    f"sample, at x = {q[0] * 1e3:+.2f} mm): put the slit at least {slit_min * 1e3:.1f} mm before "
-                    f"the sample, or shorten the blades to {max(abs(q[0]) - edge - wx, 0) * 1e3:.1f} mm")
+    sig = 2 * wx / 2.3548
+    Phi = lambda u: 0.5 * (1 + math.erf(u / math.sqrt(2)))
+    T_slit = Phi((hi - q[0]) / sig) - Phi((lo - q[0]) / sig) if M[2] < z["slit"] else 1.0
+    gap_half = min(hi, -lo)
+    # largest slit → sample distance at which the probe (FWHM) still fits through the gap
+    slit_max = (gap_half - wx) / math.tan(phi) if phi > 1e-6 else (float("inf") if gap_half > wx else -1.0)
+    if T_slit < 0.9:
+        if gap_half <= wx:
+            fix = (f"the probe ({p.probe_waist_um:g} µm FWHM, {2 * wx * 1e6:.0f} µm across the slit plane) is wider than "
+                   f"the gap ({(hi - lo) * 1e6:.0f} µm): use a smaller probe")
+        else:
+            fix = f"put the slit at most {slit_max * 1e3:.3f} mm before the sample"
+        obst.append(f"only {T_slit * 100:.0f} % of the probe passes the slit gap: {(z['sample'] - z['slit']) * 1e3:.2f} mm "
+                    f"before the sample the probe is at x = {q[0] * 1e3:+.3f} mm, the gap is {lo * 1e3:+.3f} … "
+                    f"{hi * 1e3:+.3f} mm; {fix}")
+    # overlap with the X-ray spot at the sample (footprint of the probe vs FWHM of A(-1)/B(+1))
+    fx, fy = 2 * wx * 1e6, 2 * w * 1e6
+    xs_, ys_ = m.get("fwhm_A_s_um", float("nan")), m.get("fwhm_A_o_um", float("nan"))
+    if fx > xs_ or fy > ys_:
+        obst.append(f"the probe footprint ({fx:.0f} × {fy:.0f} µm) is larger than the X-ray spot ({xs_:.0f} × {ys_:.0f} µm "
+                    f"FWHM): part of the probe misses the grating")
     # grating chip
     if M[2] < p.z_grating < S[2]:
         q = at_plane(S, d_in, p.z_grating)
@@ -503,7 +525,8 @@ def probe_geometry(res: "Result") -> dict:
         obst.append(f"the steering mirror ({p.probe_mirror_diam_mm:g} mm) would cut the X-ray beams "
                     f"({-clear * 1e3:.1f} mm overlap): move it further away or use a smaller mirror")
     return dict(mirror=M, mirror_normal=mn, feed=feed, d_in=d_in, d_tr=d_tr, d_df=d_df, S=S, nrm=nrm,
-                mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst, slit_min_mm=slit_min * 1e3,
+                mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst, slit_max_mm=slit_max * 1e3,
+                slit_T=T_slit, probe_foot_um=(fx, fy),
                 mirror_xyz_mm=(M[0] * 1e3, M[1] * 1e3, M[2] * 1e3))
 
 
@@ -641,7 +664,7 @@ class Rays:
         p = self.p
         rng = np.random.default_rng(seed)
         h = max(M // 2, 1)
-        D = {"x": p.beam_fwhm_x_mm * 1e-3, "y": p.beam_fwhm_y_mm * 1e-3}
+        D = {"x": p.beam_fwhm("x") * 1e-3, "y": p.beam_fwhm("y") * 1e-3}
         F = {"x": p.focus_fwhm_x_um * 1e-6, "y": p.focus_fwhm_y_um * 1e-6}
 
         def draw_u(d):
@@ -947,7 +970,7 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
     # Bandwidth does NOT wash the fringes out: in this geometry the TG is the converging-beam
     # projection of the grating's +-1 interference, Lambda = (p/2) R_sample/R_grating for every
     # wavelength (checked with the wave-optics propagator in sdxtg_wave.py).
-    D_s = (p.beam_fwhm_x_mm if p.split_axis == "x" else p.beam_fwhm_y_mm) * 1e-3
+    D_s = p.beam_fwhm(p.split_axis) * 1e-3
     l_c = p.coh_ratio * D_s / FWHM_PER_SIGMA
     if len(xa) > 20 and len(xb) > 20:
         edges = np.linspace(min(xa.min(), xb.min()), max(xa.max(), xb.max()), 41)
@@ -1000,7 +1023,7 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
         m.update(probe_mirror_clear_mm=g["mirror_clear_mm"], probe_mirror_aoi_deg=g["mirror_aoi_deg"],
                  probe_mirror_z=g["mirror"][2], probe_mirror_x_mm=g["mirror"][0] * 1e3,
                  probe_mirror_y_mm=g["mirror"][1] * 1e3, probe_clashes=float(len(g["obstacles"])),
-                 probe_slit_min_mm=g["slit_min_mm"])
+                 probe_slit_max_mm=g["slit_max_mm"], probe_slit_T=g["slit_T"])
         res.warnings.extend("probe: " + o for o in g["obstacles"])
     return res
 
@@ -1464,7 +1487,7 @@ def scan_caption(p: Params, maps) -> str:
             "bs_width": f"grating period solved for Λ = {p.tg_set_nm:g} nm"}[kind]
     return (f"{len(maps['z_grating'])} grating positions × {len(maps['y'])} values of {ylab} = {n} simulations; "
             f"{nd} discarded because their TG period is outside the target {tg_range_text(p)} (grey). "
-            f"{held.capitalize()}. Held fixed: beam {p.beam_fwhm_x_mm}×{p.beam_fwhm_y_mm} mm, ΔE/E {p.bandwidth_pct}%, focus "
+            f"{held.capitalize()}. Held fixed: beam {p.beam_fwhm_x_mm}×{p.beam_fwhm_y_mm} mm ({p.beam_size_def}), ΔE/E {p.bandwidth_pct}%, focus "
             f"{p.focus_fwhm_x_um} µm, beamstop {p.bs_width_mm if kind != 'bs_width' else '(axis)'} mm at z={p.z_bs} m, "
             f"{p.grating_type} grating duty {p.duty}, sample {p.sample_mode}, slit {p.slit_upstream_mm} mm before sample, "
             f"direct-beam beamstop {p.dbs_after_sample_mm} mm after sample, CCD {p.ccd_width_mm} mm at z={p.z_det} m. "
@@ -1483,7 +1506,7 @@ def summary(res: Result) -> str:
     if "z_sample" not in m:
         return "No valid configuration:\n  " + "\n  ".join(res.warnings)
     L = [
-        f"λ = {p.wavelength_nm} nm, ΔE/E = {p.bandwidth_pct}%, beam {p.beam_fwhm_x_mm}×{p.beam_fwhm_y_mm} mm, split along {p.split_axis}",
+        f"λ = {p.wavelength_nm} nm, ΔE/E = {p.bandwidth_pct}%, beam {p.beam_fwhm_x_mm}×{p.beam_fwhm_y_mm} mm ({p.beam_size_def}), split along {p.split_axis}",
         f"TG target {tg_range_text(p)}; grating period "
         + (f"solved for Λ = {p.tg_set_nm:g} nm" if p.period_mode == "target" else "set manually")
         + f" → Λ = {m['tg_period_nm']:.1f} nm " + ("(in range)" if m.get("tg_in_range") else "(OUT OF RANGE: discarded)"),
@@ -1586,7 +1609,7 @@ def main():
         elif kind == "period":
             yv = np.geomspace(args.pmin, args.pmax, args.np)
         else:
-            D = p.beam_fwhm_x_mm if p.split_axis == "x" else p.beam_fwhm_y_mm
+            D = p.beam_fwhm(p.split_axis)
             yv = np.linspace(0.3 * D, 1.6 * D, args.np)
         r = simulate(p, n_rays=20000)
         txt = summary(r)

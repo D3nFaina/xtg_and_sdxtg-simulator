@@ -130,8 +130,10 @@ python sdxtg_app.py
   travels in the horizontal plane of the X-ray beams (it contains the grating vector), so it diffracts in the same
   plane as the SD beams. The tab prints its position, the angle of incidence on the mirror and
   its clearance from the X-ray beams, and warns when the probe hits the slit blades, grating chip or direct-beam stop.
-- **Known clash.** With the slit 1 mm before the sample and a 300 µm probe at ~42°, the incoming probe hits a slit blade.
-  The app gives the minimum slit distance (≈ 11.6 mm at Λ = 300 nm) or the maximum blade length.
+- **Probe through the slit.** The probe has to overlap A(−1) and B(+1) on the sample, so it passes through the gap
+  of the order-selecting slit. The app gives the fraction of the probe that passes and the largest slit → sample
+  distance for it: ≈ 0.25 mm at Λ = 450 nm (400 nm probe at 26°, 50 µm FWHM); the default slit is 0.2 mm upstream.
+  It also flags a probe footprint larger than the X-ray spot.
 - **🧊 3D view.** Each beam is a tube through the ellipses spanned by its x and y ray envelopes (2–98 %), plus the
   optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom, Alt/⌥ + scroll to zoom towards the cursor; the view is kept between runs. Transverse axes are stretched by
   an adjustable factor; "around the sample" at ×1 is to scale. An optional ray cloud shows the individual rays.
@@ -161,7 +163,8 @@ python sdxtg_app.py
   If f_V is meant from the HM instead, set f_V = 1.0.
 * Focal spot 40 µm FWHM in both axes. The diffraction limit at 2.33 nm is about 1 µm, so the 40 µm (source size,
   mirror errors) is an input.
-* Input beam before the KB is Gaussian, 4 mm FWHM (pink) or 1 mm FWHM (mono); `flattop` is also available.
+* Input beam before the KB is round and Gaussian, 4 mm (pink) or 1 mm (mono) **waist w₀ (1/e² radius)**, so FWHM =
+  1.177 w₀ = 4.71 / 1.18 mm. The sidebar can switch the meaning to 1/e² diameter or FWHM; `flattop` is also available.
 * Bandwidth and pulse energy are **placeholders** (pink 0.5 %, 100 µJ; mono 0.02 %, 10 µJ). The absolute fluence
   scales with them.
 * The beamstop after the KB is a bar along the split axis (default x). It leaves half-beam A (x > 0) and
@@ -262,11 +265,11 @@ In optical mode (j)–(l) are the A(−1) angle to the normal, the probe Bragg a
 * The beamstop after the KB has to be **wider than the beam FWHM at its position (about 1.3–1.5×) with an
   amplitude grating**. Otherwise the zero orders leak through the slit for every grating setting. That pushes A and B
   into the beam tails, so the TG contrast is only about 0.25 for partially coherent SASE (coh_ratio = 2.7).
-* Presets (amplitude grating, Λ target 20–300 nm, setpoint 50 nm): pink: beamstop 3.0 mm at 1.0 m, grating
-  1.80 m, p = 108.6 nm (solved) → sample 1.816 m (15.9 mm after the grating), A(−1)/B(+1) at ∓23.29 mrad
-  (∓1.334°) to the normal, overlap region 10.3 mm, contrast 0.24 (wave 0.24), SD beams at ±12.9 mm on the CCD.
-  Mono: beamstop 0.75 mm, grating 1.45 m, p = 102.0 nm → sample 1.461 m, ∓23.30 mrad, overlap region 7.2 mm,
-  contrast 0.24 (wave 0.25), SD beams at ±37.7 mm on the CCD (chip moved sideways).
+* Presets (amplitude grating, waist w₀ = 4 / 1 mm, Λ target 400–500 nm, setpoint 450 nm, slit 0.2 mm before the
+  sample): pink: beamstop 3.5 mm at 1.0 m, grating 1.35 m, p = 5481 nm (solved) → sample 1.893 m, A(−1)/B(+1) at
+  ∓2.58 mrad (∓0.148°) to the normal, overlap region 58 mm, contrast 0.25, order separation at the slit 24 µm.
+  Mono: beamstop 0.88 mm, grating 1.50 m, p = 1138 nm → sample 1.605 m, ∓2.59 mrad, contrast 0.25. A 400 nm probe
+  meets these at φ_B = 26.3°.
 * The 90 × 90 scans over grating z × Λ (20–300 nm) are feasible over most of the map for pink (6090 of 8100
   points); the limits are the order separation at the slit close to the focus and the SD clearance at large Λ
   with the grating far upstream. Earlier (before the Λ target) the best amplitude-grating point was
