@@ -99,6 +99,7 @@ def rgba(hex_, a):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Parameters <-> session state
 # ─────────────────────────────────────────────────────────────────────────────
+APP_VERSION = "2026-10-22 r10"           # shown in the sidebar, to check which code is running
 FIELDS = [f.name for f in sim.dataclasses.fields(sim.Params)]
 ss = st.session_state
 
@@ -146,6 +147,7 @@ def current_params() -> sim.Params:
 # ─────────────────────────────────────────────────────────────────────────────
 sb = st.sidebar
 sb.markdown("### ⚙️ Beamline parameters")
+sb.caption(f"Version {APP_VERSION} · code in {os.path.dirname(os.path.abspath(__file__))}")
 sb.radio("Input beam", ["Pink · 4 mm", "Mono · 1 mm"], key="case", horizontal=True, on_change=on_case,
          help="Loads the preset beam size, bandwidth, pulse energy, beamstop and grating of that case.")
 sb.radio("Experiment", ["sd", "optical"], key="experiment", horizontal=True,
