@@ -14,6 +14,7 @@ by `exag` (transverse exaggeration), because the beams are mm wide over 2 m.  Wi
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
@@ -81,6 +82,25 @@ def _line(P0, P1, color, name, exag, width=6, dash=None, show=True):
                         line=dict(color=color, width=width, dash=dash), showlegend=show, hoverinfo="name")
 
 
+def _ccd(zd, off, cw, exag):
+    """CCD camera: square sensor (true size) with a pixel-grid hint, ceramic package around it and a
+    semi-transparent camera head behind; the sensor face is at z = zd."""
+    out = [_box(zd, zd + 0.3e-3, off - cw, off + cw, -cw, cw, "#1E3A5F", "CCD sensor", 1.0, exag, True),
+           _box(zd + 0.3e-3, zd + 1.5e-3, off - 1.25 * cw, off + 1.25 * cw, -1.25 * cw, 1.25 * cw, "#C9A227",
+                "CCD package", 0.9, exag),
+           _box(zd + 1.5e-3, zd + 45e-3, off - 1.45 * cw, off + 1.45 * cw, -1.45 * cw, 1.45 * cw, "#9AA5B1",
+                "camera head", 0.18, exag)]
+    gx, gy, gz = [], [], []
+    for t in np.linspace(-cw, cw, 9):                  # pixel-grid hint, 8 x 8 cells
+        gx += [zd * 1e3 - 0.05] * 3; gy += [(off + t) * 1e3 * exag, (off + t) * 1e3 * exag, None]
+        gz += [-cw * 1e3 * exag, cw * 1e3 * exag, None]
+        gx += [zd * 1e3 - 0.05] * 3; gy += [(off - cw) * 1e3 * exag, (off + cw) * 1e3 * exag, None]
+        gz += [t * 1e3 * exag, t * 1e3 * exag, None]
+    out.append(go.Scatter3d(x=gx, y=gy, z=gz, mode="lines", line=dict(color="#5B7FA6", width=1),
+                            showlegend=False, hoverinfo="skip"))
+    return out
+
+
 def _env(R, idx, order, zz, q=0.02, max_rays=3000, extra=None, z_ref=None):
     """Ellipse parameters (cx, cy, ax, ay) of a ray subset at the z positions zz."""
     if len(idx) > max_rays:
@@ -101,7 +121,7 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     if exag is None:
         exag = 100.0 if full else 1.0
     if full:
-        zlo, zhi = min(p.z_hm, p.z_vm) - 0.1, p.z_det + 0.02
+        zlo, zhi = min(p.z_hm, p.z_vm) - 0.1, p.z_det + 0.07
     else:
         zlo = p.z_grating - 0.006
         if p.experiment == "optical" and "probe_mirror_z" in m:
@@ -137,10 +157,10 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
             if zz is not None:
                 tr.append(_tube(zz, *_env(R, b.idx, b.order, zz), COL["other"], "other orders (to the slit)",
                                 0.18, exag, nth=16, show=b is next(bb for bb in res.bundles if not bb.wanted)))
-    # self-diffracted beams (SD mode)
-    if p.experiment == "sd" and res.sd_slopes != (0.0, 0.0):
+    # self-diffracted beams (present in both experiments: the optical probe does not remove them)
+    if res.sd_slopes != (0.0, 0.0):
         sA, sB = res.sd_slopes
-        for b, extra, nm in ((wA, sA - sB, "SD 2kA−kB"), (wB, sB - sA, "SD 2kB−kA")):
+        for b, extra, nm in ((wA, res.sd_extra[0], "SD 2kA−kB"), (wB, res.sd_extra[1], "SD 2kB−kA")):
             k = b.idx[b.slit_mask]
             zz = seg(z["sample"], p.z_det)
             if zz is not None and len(k) > 5:
@@ -194,10 +214,8 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
     if res.dbs != (0.0, 0.0) and zlo <= z["dbs"] <= zhi:
         tr.append(_box(z["dbs"] - th, z["dbs"] + th, res.dbs[0], res.dbs[1], -Hy, Hy, COL["el"], "direct-beam stop",
                        0.9, exag, True))
-    if zlo <= p.z_det <= zhi + 0.03:
-        off = m.get("ccd_offset_used_mm", p.ccd_offset_mm) * 1e-3
-        cw = p.ccd_width_mm * 1e-3 / 2
-        tr.append(_box(p.z_det, p.z_det + 2 * th, off - cw, off + cw, -cw, cw, COL["ccd"], "CCD chip", 0.6, exag, True))
+    if zlo <= p.z_det <= zhi:
+        tr += _ccd(p.z_det, m.get("ccd_offset_used_mm", p.ccd_offset_mm) * 1e-3, p.ccd_width_mm * 1e-3 / 2, exag)
 
     # ── optical probe ───────────────────────────────────────────────────────
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
@@ -222,12 +240,13 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         aspect = None
     fig.update_layout(
         height=720, margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor="white",
-        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=11), itemsizing="constant"),
+        legend=dict(orientation="v", y=0.98, x=0.0, xanchor="left", yanchor="top", font=dict(size=11), itemsizing="constant", bgcolor="rgba(255,255,255,0.75)"),
         scene=dict(
             xaxis=dict(title="z [mm]", backgroundcolor="#F6F8FB", gridcolor="#E6EAF0", range=[zlo * 1e3, zhi * 1e3]),
             yaxis=dict(title=f"x [mm] × {exag:g}" if exag != 1 else "x [mm]", backgroundcolor="#F6F8FB",
                        gridcolor="#E6EAF0"),
-            zaxis=dict(title=f"y [mm] × {exag:g}" if exag != 1 else "y [mm]", backgroundcolor="#F6F8FB",
+            zaxis=dict(title=f"y (vertical) [mm] × {exag:g}" if exag != 1 else "y (vertical) [mm]",
+                       backgroundcolor="#F6F8FB",
                        gridcolor="#E6EAF0"),
             aspectmode=mode, aspectratio=aspect,
             camera=dict(eye=dict(x=-1.1, y=-1.6, z=0.9) if full else dict(x=-1.4, y=-1.3, z=0.8),
@@ -308,3 +327,70 @@ def figure_probe_2d(res: sim.Result, plane="xz"):
     f.update_xaxes(title="z − z_sample [mm]", range=[(zlo - zs) * 1e3, (zhi - zs) * 1e3])
     f.update_yaxes(title=f"{lab} [mm]", scaleanchor="x", scaleratio=1)
     return f
+
+
+_NAV_JS = """
+function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function add(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+function mul(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function unit(a) { var n = Math.sqrt(dot(a, a)) || 1; return mul(a, 1 / n); }
+function v(o) { return [o.x, o.y, o.z]; }
+function o(a) { return {x: a[0], y: a[1], z: a[2]}; }
+var gd = document.getElementById('sdx3d'), KEY = 'sdxtg3d_cam_' + REGION;
+function scene() { return gd._fullLayout.scene._scene; }
+function setup() {
+  // keep the view across reruns of the app
+  try { var c0 = JSON.parse(localStorage.getItem(KEY)); if (c0) Plotly.relayout(gd, {'scene.camera': c0}); } catch (e) {}
+  gd.on('plotly_relayout', function () {
+    try { localStorage.setItem(KEY, JSON.stringify(scene().getCamera())); } catch (e) {}
+  });
+  gd.on('plotly_doubleclick', function () { try { localStorage.removeItem(KEY); } catch (e) {} });
+  window.addEventListener('resize', function () { Plotly.Plots.resize(gd); });
+  // Alt / Option + scroll: zoom towards the point under the cursor (the camera and its rotation centre
+  // both move towards it, so the view stays anchored where you point)
+  window.addEventListener('wheel', function (e) {
+    if (!e.altKey || !gd.contains(e.target)) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    var sc = scene(), cam = sc.getCamera();
+    var E = v(cam.eye), C = v(cam.center), U = v(cam.up);
+    var r = sc.container.getBoundingClientRect();
+    var nx = 2 * (e.clientX - r.left) / r.width - 1, ny = 1 - 2 * (e.clientY - r.top) / r.height;
+    var f = unit(sub(C, E)), rt = unit(cross(f, U)), up = cross(rt, f);
+    var t = Math.tan(Math.PI / 8);                        // plotly's vertical field of view is 45 deg
+    var d = unit(add(f, add(mul(rt, nx * t * r.width / r.height), mul(up, ny * t))));
+    var dist = Math.sqrt(dot(sub(C, E), sub(C, E)));
+    var P = add(E, mul(d, dist / dot(d, f)));            // cursor ray at the depth of the rotation centre
+    var dy = e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY;
+    var s = Math.exp(Math.max(-0.5, Math.min(0.5, dy * 0.0015)));   // < 1: zoom in
+    Plotly.relayout(gd, {'scene.camera': {eye: o(add(P, mul(sub(E, P), s))), center: o(add(P, mul(sub(C, P), s))),
+                                          up: cam.up, projection: cam.projection}});
+  }, {capture: true, passive: false});
+}
+// draw only once the frame is visible: drawn inside a hidden tab, plotly measures the legend text as 0 wide
+var drawn = false;
+new IntersectionObserver(function (es) {
+  if (es[0].isIntersecting && !drawn) {
+    drawn = true;
+    Plotly.newPlot(gd, FIG.data, FIG.layout, CONFIG).then(setup);
+  }
+}).observe(gd);
+"""
+_PLOTLY_JS = None
+
+
+def html_3d(fig, region="full", height=740):
+    """Stand-alone HTML for the 3-D figure with extra navigation: Alt/Option + scroll zooms towards the
+    cursor, and the camera is remembered across reruns. plotly.js is inlined (works offline)."""
+    global _PLOTLY_JS
+    if _PLOTLY_JS is None:
+        from plotly.offline import get_plotlyjs
+        _PLOTLY_JS = get_plotlyjs()
+    fig = go.Figure(fig)
+    fig.update_layout(height=height - 10, autosize=True)
+    cfg = dict(scrollZoom=True, displaylogo=False, responsive=True)
+    return ("<!doctype html><html><head><meta charset='utf-8'><style>body{margin:0;background:white}</style>"
+            f"<script>{_PLOTLY_JS}</script></head><body><div id='sdx3d' style='width:100%;height:{height - 10}px'></div>"
+            f"<script>var FIG = {fig.to_json()}; var CONFIG = {json.dumps(cfg)}; var REGION = {json.dumps(region)};"
+            + _NAV_JS + "</script></body></html>")

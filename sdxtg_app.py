@@ -40,6 +40,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 import sdxtg_sim as sim
 import sdxtg_wave as wave
@@ -164,7 +165,9 @@ with sb.expander("KB mirrors and CCD", expanded=False):
     st.number_input("VM position z [m]", 0.05, 2.0, step=0.01, key="z_vm")
     st.number_input("f_V, from VM [m]", 0.3, 5.0, step=0.01, key="f_v")
     st.number_input("CCD position z [m]", 0.5, 5.0, step=0.005, format="%.3f", key="z_det")
-    st.number_input("CCD chip width, split axis [mm]", 1.0, 100.0, step=0.1, key="ccd_width_mm")
+    st.number_input("CCD chip side [mm]", 1.0, 100.0, step=0.1, key="ccd_width_mm",
+                    help="Square chip. 1024 × 13 µm = 13.3 mm (e.g. Andor iKon-M, PI-MTE 1024); "
+                         "2048 × 13.5 µm = 27.6 mm (PI-MTE 2048, Andor iKon-L).")
     st.toggle("Move the CCD sideways onto the SD beam", key="ccd_follow_sd",
               help="Small Λ means large angles: the self-diffracted beam leaves at ~1.5× the crossing angle "
                    "and misses a CCD centred on the axis. On: the chip is centred on SD(A).")
@@ -214,29 +217,52 @@ with sb.expander("Grating", expanded=True):
     st.number_input("Membrane transmission", 0.0, 1.0, step=0.05, key="membrane_T")
     st.number_input("Grating chip size [mm]", 0.5, 50.0, step=0.5, key="grating_chip_mm")
 
-# SrTiO3 refractive index (ordinary, room temperature), approximate literature values
-STO_N = ([400, 450, 500, 589, 633, 800, 1030, 1300], [2.64, 2.53, 2.47, 2.41, 2.39, 2.34, 2.31, 2.29])
-
-
-def compute_att():
+def load_material():
+    name = ss["sample_preset"]
+    if name == "custom":
+        return
+    ss["sample_formula"], ss["sample_density"] = name, sim.SAMPLE_PRESETS[name]
+    ss["sample_auto_att"] = True
     try:
-        ss["xray_atten_nm"] = round(sim.xray_atten_length_nm(ss["sample_formula"], ss["sample_density"],
-                                                              ss["wavelength_nm"]), 1)
-        ss["att_msg"] = (f"{ss['sample_formula']}, ρ = {ss['sample_density']} g/cm³ at "
-                         f"{1239.842 / ss['wavelength_nm']:.0f} eV: {ss['xray_atten_nm']:.1f} nm (Henke tables).")
-    except ImportError:
-        ss["att_msg"] = "Needs the periodictable package: pip install periodictable"
-    except Exception as e:                                          # noqa: BLE001
-        ss["att_msg"] = f"Could not compute it: {e}"
+        import periodictable as pt
+        ref = sim.SAMPLE_REF.get(str(pt.formula(name).hill))
+    except Exception:                                               # noqa: BLE001
+        ref = None
+    if ref and ref.get("n"):
+        ss["sample_n"] = round(float(np.interp(ss["probe_wavelength_nm"], *ref["n"])), 3)
 
 
-def load_sto():
-    ss["sample_formula"], ss["sample_density"], ss["sample_thickness_nm"] = "SrTiO3", 5.12, 10000.0
-    ss["sample_n"] = round(float(np.interp(ss["probe_wavelength_nm"], *STO_N)), 3)
-    compute_att()
-    if "periodictable" in ss.get("att_msg", ""):
-        ss["xray_atten_nm"] = 159.0
-        ss["att_msg"] = "159 nm = STO at 532 eV (Henke/CXRO); install periodictable to compute other energies."
+FLAG = dict(ok=("#1E9E6A", "consistent"), bad=("#D64545", "not consistent"), warn=("#E0A100", "check"),
+            na=("#8A94A3", "no reference"))
+with sb.expander("Sample material", expanded=True):
+    if "sample_preset" not in ss:
+        ss["sample_preset"] = "SrTiO3" if ss["sample_formula"] == "SrTiO3" else "custom"
+    st.selectbox("Material", list(sim.SAMPLE_PRESETS) + ["custom"], key="sample_preset", on_change=load_material,
+                 help="Fills formula, density and the optical index at the probe wavelength from the literature table; "
+                      "choose 'custom' and type your own values.")
+    c1, c2 = st.columns([1.3, 1])
+    c1.text_input("Formula", key="sample_formula")
+    c2.number_input("ρ [g/cm³]", 0.01, 25.0, step=0.01, key="sample_density")
+    st.number_input("Thickness [nm]", 1.0, 1e6, step=10.0, key="sample_thickness_nm")
+    st.toggle("X-ray L_att from the Henke tables (CXRO)", key="sample_auto_att",
+              help="On: attenuation length at the pump energy computed from formula and density with periodictable. "
+                   "Off: type a value (e.g. a measured one near an absorption edge); it is checked against Henke.")
+    st.number_input("X-ray attenuation length [nm]", 0.1, 1e7, step=1.0, key="xray_atten_nm",
+                    disabled=ss["sample_auto_att"],
+                    help="1/e intensity depth of the pump. The TG amplitude decays as exp(−z/L_att) into the sample.")
+    if ss["experiment"] == "optical":
+        st.number_input("Refractive index at the probe wavelength", 1.0, 5.0, step=0.01, key="sample_n")
+    rows = sim.sample_checks(current_params())
+    worst = "bad" if any(r[3] == "bad" for r in rows) else ("ok" if all(r[3] in ("ok", "warn") for r in rows) else "na")
+    col, txt = FLAG[worst]
+    html = (f"<div style='margin:4px 0 6px;padding:6px 10px;border-radius:8px;background:{col};color:white;"
+            f"font-weight:600;font-size:.85rem'>Sample: {'consistent' if worst == 'ok' else txt}</div>")
+    for q, val, ref, stt, note in rows:
+        c, t = FLAG[stt]
+        html += (f"<div style='font-size:.76rem;line-height:1.3;margin:3px 0'><span style='color:{c};font-weight:700'>"
+                 f"● {t}</span> · <b>{q}</b> {val}" + (f" vs {ref}" if ref not in ("-", val) else "")
+                 + f"<br><span style='color:#6B7785'>{note}</span></div>")
+    st.markdown(html, unsafe_allow_html=True)
 
 
 if ss["experiment"] == "optical":
@@ -245,28 +271,13 @@ if ss["experiment"] == "optical":
         st.toggle("Probe at the Bragg (phase-matched) angle", key="probe_auto_bragg")
         st.number_input("Probe incidence angle from the normal [deg]", -89.0, 89.0, step=0.1, key="probe_angle_deg",
                         disabled=ss["probe_auto_bragg"])
-        st.slider("Plane of incidence (azimuth) [deg]", -90.0, 90.0, step=1.0, key="probe_azimuth_deg",
-                  help="0 = the probe comes in the split plane (x–z), which contains the grating vector; 90 = the "
-                       "other plane (y–z). Phase matching needs sin φ cos χ = λ/(2Λ), so tilting the plane raises φ_B.")
         st.number_input("Steering mirror → sample [mm]", 5.0, 1000.0, step=1.0, key="probe_mirror_dist_mm")
         st.number_input("Mirror diameter [mm]", 1.0, 100.0, step=0.1, key="probe_mirror_diam_mm")
         st.radio("Probe reaches the mirror", ["z", "side"], key="probe_feed", horizontal=True,
-                 format_func=lambda v: "along the beamline (+z)" if v == "z" else "from the side")
+                 format_func=lambda v: "along the beamline (+z)" if v == "z" else "from the side",
+                 help="The probe always travels in the horizontal plane of the X-ray beams (same height), so it "
+                      "diffracts in the same plane as the self-diffracted beams.")
         st.number_input("Probe FWHM on the sample [µm]", 1.0, 5000.0, step=10.0, key="probe_waist_um")
-        st.button("Use SrTiO₃, 10 µm", on_click=load_sto, **WIDE,
-                  help="n of STO at the probe wavelength (approximate literature values, ±0.02) and the X-ray "
-                       "attenuation length at the pump energy from the Henke tables (the CXRO data).")
-        st.number_input("Sample refractive index at the probe", 1.0, 5.0, step=0.01, key="sample_n")
-        st.number_input("Sample thickness [nm]", 1.0, 1e6, step=10.0, key="sample_thickness_nm")
-        st.number_input("X-ray attenuation length [nm]", 1.0, 1e7, step=1.0, key="xray_atten_nm",
-                        help="1/e intensity depth of the pump. The TG amplitude decays as exp(−z/L_att) into the "
-                             "sample, so it sets the grating depth when it is shorter than the thickness.")
-        c1, c2 = st.columns([1.3, 1])
-        c1.text_input("Formula", key="sample_formula")
-        c2.number_input("ρ [g/cm³]", 0.1, 25.0, step=0.01, key="sample_density")
-        st.button("Compute attenuation (Henke/CXRO)", on_click=compute_att, **WIDE)
-        if ss.get("att_msg"):
-            st.caption(ss["att_msg"])
 
 with sb.expander("Sample and order-selecting slit", expanded=True):
     st.radio("Sample position", ["crossing", "fixed"], key="sample_mode", horizontal=True,
@@ -386,13 +397,30 @@ else:
         f"chip {p.ccd_width_mm:g} mm centred at {m['ccd_offset_used_mm']:.1f} mm · margin {m['sd_ccd_margin_mm']:.1f} mm · "
         f"direct beams at ±{abs(m['det_direct_A_um']) / 1e3:.1f} mm",
         "good" if m["sd_ccd_margin_mm"] > 0 else "bad")
+if p.experiment == "optical":
+    st.write("")
+    cols = st.columns(4)
+    kpi(cols[0], "SD past direct-beam stop", f"{m['sd_clear_dbs_um']:.0f} µm",
+        f"direct leak {m['direct_leak_pct']:.2g} % · stop {m['dbs_width_um_used']:.0f} µm wide",
+        "good" if m["sd_clear_dbs_um"] > 20 else "bad")
+    kpi(cols[1], "SD beam on the CCD", f"SD at ±{abs(m['det_SD_A_um']) / 1e3:.1f} mm",
+        f"chip {p.ccd_width_mm:g} mm centred at {m['ccd_offset_used_mm']:.1f} mm · margin {m['sd_ccd_margin_mm']:.1f} mm",
+        "good" if m["sd_ccd_margin_mm"] > 0 else "bad")
+    if "probe_mirror_x_mm" in m:
+        kpi(cols[2], "Steering mirror", f"x = {m['probe_mirror_x_mm']:+.1f} mm",
+            f"{(res.z['sample'] - m['probe_mirror_z']) * 1e3:.1f} mm before the sample, same height as the X-rays · "
+            f"AOI {m['probe_mirror_aoi_deg']:.1f}° · clears X-rays by {m['probe_mirror_clear_mm']:.1f} mm",
+            "good" if m["probe_mirror_clear_mm"] > 0 else "bad")
+        kpi(cols[3], "Probe past the slit", f"slit ≥ {m['probe_slit_min_mm']:.1f} mm",
+            f"needed slit → sample distance for a free probe path; now {p.slit_upstream_mm:g} mm · "
+            f"{int(m['probe_clashes'])} obstacle(s)", "good" if m["probe_clashes"] == 0 else "bad")
 for w in res.warnings:
     st.warning(w, icon="⚠️")
 st.write("")
 
-tab_bl, tab_3d, tab_sz, tab_pr, tab_an, tab_sc, tab_wv, tab_md = st.tabs(
+tab_bl, tab_3d, tab_sz, tab_pr, tab_an, tab_tg, tab_sc, tab_wv, tab_md = st.tabs(
     ["🛰️ Beamline", "🧊 3D view", "📏 Beam size", "🎯 Slit · sample · CCD", "📐 Angles · optical probe",
-     "🗺️ Correlation scan", "🌊 Wave-optics check", "📘 Model & assumptions"])
+     "🧪 TG in the sample", "🗺️ Correlation scan", "🌊 Wave-optics check", "📘 Model & assumptions"])
 
 with tab_3d:
     c1, c2, c3, c4 = st.columns([1.4, 1.4, 1, 1])
@@ -402,8 +430,19 @@ with tab_3d:
                           value=100 if reg == "full" else 1, key=f"v3d_exag_{reg}")
     orders = c3.toggle("Other orders", value=True, key="v3d_orders")
     rays_on = c4.toggle("Ray cloud", value=False, key="v3d_rays")
-    st.plotly_chart(s3d.figure_3d(res, reg, float(ex), orders, rays_on), **WIDE)
-    st.caption("Drag to rotate, scroll to zoom, right-drag to pan, double-click to reset. Each beam is a tube through "
+    f3d = s3d.figure_3d(res, reg, float(ex), orders, rays_on)
+    if ss.get("v3d_nav", True):
+        if hasattr(st, "iframe"):                  # Streamlit >= 1.52
+            st.iframe(s3d.html_3d(f3d, reg, 740), height=750)
+        else:
+            components.html(s3d.html_3d(f3d, reg, 740), height=750)
+    else:
+        st.plotly_chart(f3d, **WIDE)
+    st.toggle("Zoom towards the cursor with Alt/⌥ + scroll", value=True, key="v3d_nav",
+              help="Off: the plain Plotly chart (scroll always zooms towards the rotation centre).")
+    st.caption("Drag to rotate, scroll to zoom towards the rotation centre, **Alt/⌥ + scroll to zoom towards the point "
+               "under the cursor** (the rotation centre follows), right-drag to pan, double-click to reset. The view "
+               "is kept when you change parameters. Each beam is a tube through "
                "the ellipses spanned by its ray envelopes (2–98 %) in x and y, so the shapes come from the same rays as "
                "the x and y views. With an exaggeration other than 1 the transverse axes are stretched and angles look "
                "steeper than they are; 'around the sample' at ×1 is to scale.")
@@ -468,7 +507,32 @@ def elements(fig, row, sc, ymax, full):
     else:
         fig.add_annotation(x=z["sample"], y=ymax, text="slit · sample · stop", showarrow=False, yanchor="bottom",
                            xanchor="right", font=dict(size=11, color=C["sample"]), row=row, col=1)
-    vline(z["det"], "CCD", C["ink"], "solid", 4)
+    # CCD: the chip itself (side, centred where the sidebar puts it), with the camera plane dotted
+    off, cw = m.get("ccd_offset_used_mm", p.ccd_offset_mm) * 1e-3, p.ccd_width_mm * 1e-3 / 2
+    vline(z["det"], "CCD", "#94A3B8", "dot", 1)
+    fig.add_shape(type="rect", x0=z["det"], x1=z["det"] + 1.5 * wz, y0=(off - cw) * sc, y1=(off + cw) * sc,
+                  fillcolor="#1E3A5F", line=dict(color="#C9A227", width=1.5), row=row, col=1)
+
+
+def probe_lines(fig, row, sc, ymax):
+    """Optical probe in the split plane: steering mirror → sample, transmitted and diffracted probe."""
+    if p.experiment != "optical" or "probe_mirror_x_mm" not in m:
+        return
+    g = sim.probe_geometry(res)
+    S, L = g["S"], 2 * (z["det"] - z["sample"])
+    show = row == 1
+
+    def ln(A, B, color, name, width, dash=None):
+        fig.add_trace(go.Scatter(x=[A[2], B[2]], y=[A[0] * sc, B[0] * sc], mode="lines", name=name,
+                                 line=dict(color=color, width=width, dash=dash), legendgroup=name,
+                                 showlegend=show, hoverinfo="name"), row=row, col=1)
+    ln(g["mirror"], S, s3d.COL["probe"], f"optical probe {p.probe_wavelength_nm:g} nm", 3)
+    ln(S, S + L * g["d_tr"], s3d.COL["probe"], "transmitted probe", 1.5, "dash")
+    if g["d_df"] is not None:
+        ln(S, S + L * g["d_df"], s3d.COL["probe_d"], "diffracted probe (signal)", 3)
+    fig.add_annotation(x=z["sample"], y=-0.78 * ymax, xshift=-8, text=f"probe from the mirror at x = {m['probe_mirror_x_mm']:+.1f} mm, "
+                            f"z = {m['probe_mirror_z']:.4f} m ", showarrow=False, xanchor="right",
+                       font=dict(size=11, color=s3d.COL["probe"]), row=row, col=1)
 
 
 with tab_bl:
@@ -506,6 +570,8 @@ with tab_bl:
     fig.update_xaxes(range=[x0, z["det"] + 0.02 * (z["det"] - x0)], title="z from HM [m]", row=2, col=1, **AX)
     fig.update_yaxes(range=[-ymax1, ymax1], title=f"{p.split_axis} [mm]", row=1, col=1, **AX)
     fig.update_yaxes(range=[-ymax2, ymax2], title=f"{p.split_axis} [µm]", row=2, col=1, **AX)
+    probe_lines(fig, 1, 1e3, ymax1)
+    probe_lines(fig, 2, 1e6, ymax2)
     fig.update_layout(height=860, **LAYOUT)
     fig.update_layout(margin=dict(l=60, r=20, t=80, b=45), legend=dict(y=1.06))
     for an in fig.layout.annotations[:2]:          # subplot titles: left-aligned, above the labels
@@ -585,7 +651,7 @@ def profile_fig(zpos, bins, masked, title, shade=None, shade_inside=False, sd=Fa
                                fill="tozeroy" if b.wanted else None, fillcolor=rgba(col, 0.15)))
     if sd:
         sA, sB = res.sd_slopes
-        for b, extra, nm in [(bb, (sA - sB) if bb.beam == "A" else (sB - sA), "SD_" + bb.beam)
+        for b, extra, nm in [(bb, res.sd_extra[0] if bb.beam == "A" else res.sd_extra[1], "SD_" + bb.beam)
                              for bb in res.bundles if bb.wanted]:
             k = b.idx[b.slit_mask]
             x = (R.s(zpos, k, b.order) + extra * (zpos - z["sample"])) * 1e6
@@ -651,6 +717,62 @@ with tab_pr:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Correlation scan
 # ─────────────────────────────────────────────────────────────────────────────
+with tab_tg:
+    t = sim.tg_in_sample(res)
+    ev = t["ev_atom"] is not None
+    cols = st.columns(4)
+    kpi(cols[0], "Transient grating", f"Λ = {t['Ls']:.1f} nm", f"contrast V = {t['V']:.2f} · grating vector along "
+        f"{p.split_axis} (horizontal), tilt {m['tg_tilt_mrad']:.2f} mrad from the surface")
+    kpi(cols[1], "Depth of the grating", f"L_att = {t['La']:.0f} nm",
+        f"{p.sample_formula} at {1239.842 / p.wavelength_nm:.0f} eV · L_eff = {t['L_eff']:.0f} nm · "
+        f"{t['absorbed'] * 100:.1f} % absorbed in {t['d']:g} nm")
+    kpi(cols[2], "Peak absorbed energy", f"{t['dose0'] * (1 + t['V']):.3g} J/cm³",
+        (f"{t['ev_atom_peak'] * 1e3:.3g} meV/atom at the surface, fringe maxima" if ev else "formula needed for eV/atom"))
+    kpi(cols[3], "Temperature jump (estimate)", f"{t['dT_peak']:.3g} K" if ev else "–",
+        "Dulong–Petit, 3 k_B per atom, peak · fringe contrast in T equals V right after the pump")
+    st.write("")
+    unit = "meV/atom" if ev else "J/cm³"
+    Z = t["ev_atom"] * 1e3 if ev else t["dose"]
+    norm = st.radio("Colour scale", ["absolute", "per depth"], horizontal=True, key="tg_norm",
+                    format_func=lambda v: "absolute" if v == "absolute" else "normalised at each depth (shows the fringes deep inside)")
+    Zs, ut = (Z, unit) if norm == "absolute" else (Z / Z.max(axis=1, keepdims=True), "rel.")
+    c1, c2 = st.columns([1.6, 1])
+    fh = go.Figure(go.Heatmap(x=t["x"], y=t["z"], z=Zs, colorscale="Magma", colorbar=dict(title=ut, thickness=12),
+                              hovertemplate="x %{x:.1f} nm<br>depth %{y:.1f} nm<br>%{z:.3g} " + ut + "<extra></extra>"))
+    for zz, lab in ((t["La"], "L_att"), (t["d"], "back face")):
+        if zz <= t["z"][-1]:
+            fh.add_hline(y=zz, line=dict(color="white", dash="dot", width=1), annotation_text=lab,
+                         annotation_font_color="white", annotation_position="bottom right")
+    fh.update_layout(height=430, title=dict(text=f"Absorbed energy in the sample, cross-section in the {p.split_axis}–z "
+                                                 "plane (X-rays enter from the top)", font=dict(size=13)),
+                     **{k_: v_ for k_, v_ in LAYOUT.items() if k_ != "legend"})
+    fh.update_xaxes(title=f"{p.split_axis} along the surface [nm]", **AX)
+    fh.update_yaxes(title="depth z [nm]", autorange="reversed", **AX)
+    c1.plotly_chart(fh, theme=None, **WIDE)
+    prof_max = Z.max(axis=1)
+    prof_min = Z.min(axis=1)
+    fd = go.Figure()
+    fd.add_trace(go.Scatter(x=prof_max, y=t["z"], name="fringe maxima", line=dict(color=C["A"], width=2)))
+    fd.add_trace(go.Scatter(x=(prof_max + prof_min) / 2, y=t["z"], name="mean", line=dict(color=C["ink"], width=1.5, dash="dash")))
+    fd.add_trace(go.Scatter(x=prof_min, y=t["z"], name="fringe minima", line=dict(color=C["B"], width=2)))
+    fd.update_layout(height=430, title=dict(text="Depth profile", font=dict(size=13)), **LAYOUT)
+    fd.update_xaxes(title=unit, **AX)
+    fd.update_yaxes(title="depth z [nm]", autorange="reversed", **AX)
+    c2.plotly_chart(fd, **WIDE)
+    st.caption(f"Absorbed energy density = F/L_att · e^(−z/L_att) · (1 + V cos(K·r)) with F = {m['fluence_sum']:.3g} mJ/cm² "
+               f"(peak fluence A+B), V = {t['V']:.2f} and L_att from the **Sample material** panel"
+               + (f"; {t['n_atoms_cm3']:.3g} atoms/cm³ for {p.sample_formula} at {p.sample_density:g} g/cm³" if ev else "")
+               + ". The temperature jump uses 3 k_B per atom (high-temperature limit), so it is an estimate; reflection "
+               "losses are neglected (soft X-rays near normal incidence).")
+    st.markdown(
+        f"**What reads this grating.** Self-diffraction: the SD beams are generated over the same depth and must "
+        f"leave through the back face, signal ∝ e^(−d/L_att)·L_eff² → relative factor **{m['sd_sample_rel']:.2g}** "
+        f"(1 = membrane of L_att·ln 3 = {m['sd_best_thickness_nm']:.0f} nm); X-ray transmission "
+        f"{m['sd_transmission']:.2g}; SD phase mismatch Δk_z = {m['sd_dkz_per_um']:.2f} µm⁻¹ → η = {m['sd_eta']:.2f}. "
+        + (f"Optical probe: grating depth L_eff = {m['probe_L_nm']:.0f} nm, Klein parameter Q = {m['probe_Q']:.2f} "
+           f"({m['probe_regime']})." if p.experiment == "optical" else ""))
+
+
 with tab_an:
     tilt = p.sample_tilt_mrad * 1e-3
     kX = 2 * math.pi / (p.wavelength_nm * 1e-9)
@@ -683,7 +805,8 @@ with tab_an:
             f"η_rel = |∫₀ᵈ e^(−z/L_att) e^(iΔk_z z) dz|² / |∫₀ᵈ e^(−z/L_att) dz|²: **sinc²(Δk_z d/2) for a uniform slab "
             f"(d ≪ L_att), a Lorentzian 1/(1 + Δk_z² L_att²) when the pump is absorbed (d ≫ L_att)**. "
             f"Effective depth {L_nm:.0f} nm, Klein parameter Q = 2πλL/(nΛ²) = {m['probe_Q']:.2f}: {m['probe_regime']}. "
-            f"Bragg angle sin φ_B cos χ = λ_probe/(2Λ) (χ = {p.probe_azimuth_deg:g}° plane of incidence): "
+            f"The probe travels in the horizontal plane of the X-ray beams, so it diffracts in the same plane as the "
+            f"self-diffracted X-rays. Bragg angle sin φ_B = λ_probe/(2Λ): "
             f"**φ_B = {m['probe_bragg_deg']:.3f}°**. A diffracted probe exists only "
             f"for Λ > λ_probe/2 = {lam_p / 2:g} nm.")
         if m["probe_ok"]:

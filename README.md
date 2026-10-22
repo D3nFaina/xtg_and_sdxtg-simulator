@@ -126,14 +126,33 @@ python sdxtg_app.py
 ### Probe layout and 3D view
 
 - **Steering mirror.** The probe comes from a movable mirror on the probe line, a distance D (default 60 mm) before the
-  sample, fed along the beamline (+z) or from the side. The mirror tilt follows from the probe angle and azimuth χ
-  (χ = 0: plane of incidence = x–z, the TG plane). The tab prints its position, the angle of incidence on the mirror and
+  sample, fed along the beamline (+z) or from the side. The mirror tilt follows from the probe angle; the probe
+  travels in the horizontal plane of the X-ray beams (it contains the grating vector), so it diffracts in the same
+  plane as the SD beams. The tab prints its position, the angle of incidence on the mirror and
   its clearance from the X-ray beams, and warns when the probe hits the slit blades, grating chip or direct-beam stop.
 - **Known clash.** With the slit 1 mm before the sample and a 300 µm probe at ~42°, the incoming probe hits a slit blade.
-  Ways out: slit further upstream, smaller probe waist, or a plane of incidence along y (χ ≠ 0).
+  The app gives the minimum slit distance (≈ 11.6 mm at Λ = 300 nm) or the maximum blade length.
 - **🧊 3D view.** Each beam is a tube through the ellipses spanned by its x and y ray envelopes (2–98 %), plus the
-  optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom. Transverse axes are stretched by
+  optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom, Alt/⌥ + scroll to zoom towards the cursor; the view is kept between runs. Transverse axes are stretched by
   an adjustable factor; "around the sample" at ×1 is to scale. An optional ray cloud shows the individual rays.
+
+### Sample material and the TG inside the sample
+
+- **Sample material panel** (both experiments). Pick a preset (SrTiO3, Si3N4, SiO2, Al2O3, MgO, diamond) or
+  type a formula, density, thickness and, for the optical probe, n. Each value gets a flag: **consistent**
+  (green), **not consistent** (red), **check** (amber) or **no reference** (grey). Checks: the formula is parsed
+  by periodictable; density against the literature table (±5 %); L_att against the Henke/CXRO value at the pump
+  energy (±10 %, or computed directly); n against the literature table at the probe wavelength (±2 %). An
+  absorption edge within ±15 eV of the pump is flagged: the Henke tables have no near-edge structure, so at
+  532 eV (just below the O K edge, where STO has its pre-edge peaks) the real L_att can be much shorter.
+- **🧪 TG in the sample.** Absorbed energy F/L_att · e^(−z/L_att) · (1 + V cos(K·r)) in the x–z
+  cross-section, depth profile of fringe maxima/minima, peak dose in J/cm³ and meV/atom, and a Dulong–Petit
+  estimate of the temperature jump.
+- **Self-diffraction through the sample.** The SD beams leave at sin θ_SD = 2 sin θ_A − sin θ_B (exact) and are
+  not phase-matched along the normal (Δk_z ≈ 5.9 µm⁻¹ at Λ = 50 nm). Their signal goes as
+  e^(−d/L_att)·L_eff²·η(Δk_z), best for a membrane d = L_att·ln 3 (≈ 175 nm STO at 532 eV). A 10 µm STO
+  crystal absorbs the SD beams completely (transmission ~1e-28): SD on the CCD needs a thin membrane, while the
+  optical probe reads the same grating in a thick crystal.
 
 ## Geometry and assumptions (all are parameters)
 

@@ -46,6 +46,7 @@ import csv
 import dataclasses
 from dataclasses import dataclass, field, asdict
 import json
+import functools
 import math
 
 import numpy as np
@@ -115,7 +116,7 @@ class Params:
     probe_wavelength_nm: float = 400.0   # optical probe
     probe_auto_bragg: bool = True        # put the probe at the Bragg (phase-matched) angle
     probe_angle_deg: float = 30.0        # external incidence angle from the sample normal
-    probe_azimuth_deg: float = 0.0       # plane of incidence: 0 = split plane (x–z), 90 = the other plane (y–z)
+    probe_azimuth_deg: float = 0.0       # unused: the probe always travels in the X-ray plane (kept for old files)
     probe_mirror_dist_mm: float = 60.0   # steering mirror → sample distance
     probe_mirror_diam_mm: float = 25.4   # steering mirror diameter (1")
     probe_feed: str = "z"                # probe reaches the mirror travelling along +z ("z") or sideways ("side")
@@ -131,12 +132,13 @@ class Params:
     sample_n: float = 2.65               # sample refractive index at the probe wavelength
     sample_thickness_nm: float = 10000.0
     xray_atten_nm: float = 159.0         # X-ray attenuation length (1/e of the intensity)
+    sample_auto_att: bool = True         # True: L_att from the Henke tables (periodictable) for formula/density
     slit_upstream_mm: float = 1.0        # slit distance upstream of the sample
     slit_auto: bool = True               # open the slit just around the wanted orders
     slit_width_um: float = 300.0         # manual slit width (centered on axis)
     slit_margin_um: float = 10.0         # extra opening on each side in auto mode
     z_det: float = 2.0                   # Princeton CCD
-    ccd_width_mm: float = 27.6           # chip width along the split axis (e.g. 2048 x 13.5 µm)
+    ccd_width_mm: float = 13.3           # square chip side (1024 x 13 µm; 2048 x 13.5 µm = 27.6 mm)
     ccd_offset_mm: float = 0.0           # lateral offset of the chip centre from the beam axis
     ccd_follow_sd: bool = True           # True: chip moved sideways to centre the SD beam (offset ignored)
     # beamstop in front of the CCD that blocks the direct (transmitted) 1st orders
@@ -194,6 +196,113 @@ def xray_atten_length_nm(formula: str, density: float, wavelength_nm: float) -> 
     return wavelength_nm / (4 * math.pi * beta)
 
 
+@functools.lru_cache(maxsize=256)
+def henke_atten_nm(formula: str, density: float, wavelength_nm: float) -> float:
+    """Cached xray_atten_length_nm(); nan if periodictable is missing or the formula is invalid."""
+    try:
+        return float(xray_atten_length_nm(formula, density, wavelength_nm))
+    except Exception:                                               # noqa: BLE001
+        return float("nan")
+
+
+# Literature values for the sample consistency checks (room temperature; n = ordinary index, approximate
+# handbook values, ±0.01–0.02). Keys are Hill formulas as periodictable writes them.
+SAMPLE_REF = {
+    "O3SrTi": dict(name="SrTiO3 (STO)", rho=5.12, n=([400, 450, 500, 589, 633, 800, 1030, 1300],
+                                                       [2.64, 2.53, 2.47, 2.41, 2.39, 2.34, 2.31, 2.29])),
+    "N4Si3": dict(name="Si3N4 (LPCVD membrane)", rho=3.17, n=([400, 500, 633, 800, 1030], [2.08, 2.05, 2.02, 2.00, 1.99])),
+    "O2Si": dict(name="SiO2 (fused silica)", rho=2.20, n=([400, 500, 589, 633, 800, 1030],
+                                                          [1.470, 1.462, 1.458, 1.457, 1.453, 1.450])),
+    "Al2O3": dict(name="Al2O3 (sapphire)", rho=3.98, n=([400, 500, 589, 633, 800, 1030],
+                                                        [1.786, 1.774, 1.768, 1.766, 1.760, 1.755])),
+    "MgO": dict(name="MgO", rho=3.58, n=([400, 500, 589, 633, 800, 1030], [1.755, 1.744, 1.737, 1.735, 1.728, 1.723])),
+    "C": dict(name="C (diamond)", rho=3.51, n=([400, 500, 589, 633, 800], [2.465, 2.431, 2.417, 2.410, 2.402])),
+    "Si": dict(name="Si", rho=2.33, n=None, note="absorbs below 1.1 µm: not transparent to the probe"),
+}
+SAMPLE_PRESETS = {"SrTiO3": 5.12, "Si3N4": 3.17, "SiO2": 2.20, "Al2O3": 3.98, "MgO": 3.58, "C": 3.51}
+
+
+def sample_checks(p: Params) -> list:
+    """Consistency of the sample constants with periodictable / Henke (CXRO) and the literature table.
+    Returns rows (quantity, value, reference, status, note); status is "ok" (consistent), "bad"
+    (not consistent), "warn" (consistent but use with care) or "na" (no reference)."""
+    rows = []
+    try:
+        import periodictable as pt
+    except ImportError:
+        return [("periodictable", "-", "-", "na", "pip install periodictable to enable the checks")]
+    try:
+        f = pt.formula(p.sample_formula)
+        if not f.atoms:
+            raise ValueError("empty formula")
+        hill = str(f.hill)
+        rows.append(("formula", p.sample_formula, hill, "ok", f"valid, M = {f.mass:.2f} g/mol"))
+    except Exception as e:                                          # noqa: BLE001
+        return [("formula", p.sample_formula, "-", "bad", f"not a chemical formula ({e})")]
+    ref = SAMPLE_REF.get(hill)
+    if ref is None and len(f.atoms) == 1:                           # pure element: periodictable density
+        el = next(iter(f.atoms))
+        ref = dict(name=el.name, rho=el.density, n=None) if el.density else None
+    # density
+    if p.sample_density <= 0:
+        rows.append(("density", f"{p.sample_density:g} g/cm³", "-", "bad", "must be > 0"))
+    elif ref and ref.get("rho"):
+        dev = p.sample_density / ref["rho"] - 1
+        rows.append(("density", f"{p.sample_density:g} g/cm³", f"{ref['rho']:g} g/cm³ ({ref['name']})",
+                     "ok" if abs(dev) <= 0.05 else "bad", f"{dev * 100:+.1f} % (tolerance ±5 %; films can be less dense)"))
+    else:
+        rows.append(("density", f"{p.sample_density:g} g/cm³", "-", "na", "no literature value for this compound"))
+    # X-ray attenuation length at the pump energy
+    E = 1239.842 / p.wavelength_nm
+    La = henke_atten_nm(p.sample_formula, max(p.sample_density, 1e-6), p.wavelength_nm)
+    if np.isfinite(La):
+        if p.sample_auto_att:
+            rows.append(("X-ray L_att", f"{La:.1f} nm", f"Henke/CXRO at {E:.1f} eV", "ok", "computed from formula and density"))
+        else:
+            dev = p.xray_atten_nm / La - 1
+            rows.append(("X-ray L_att", f"{p.xray_atten_nm:g} nm", f"{La:.1f} nm (Henke/CXRO, {E:.1f} eV)",
+                         "ok" if abs(dev) <= 0.10 else "bad", f"{dev * 100:+.1f} % (tolerance ±10 %)"))
+        # an absorption edge close to the pump energy: tabulated values miss the near-edge structure
+        Es = np.arange(E - 15, E + 15.1, 0.5)
+        Ls = np.array([henke_atten_nm(p.sample_formula, p.sample_density, 1239.842 / e) for e in Es])
+        jump = np.abs(np.diff(Ls)) / Ls[:-1]
+        if np.nanmax(jump) > 0.08:
+            Ee = Es[int(np.nanargmax(jump)) + 1]
+            rows.append(("absorption edge", f"{Ee:.0f} eV", f"pump {E:.1f} eV", "warn",
+                         f"an edge {Ee - E:+.0f} eV from the pump: Henke tables have no near-edge structure "
+                         "(pre-edge peaks), so the real L_att can be several times shorter; use a measured XAS value"))
+    else:
+        rows.append(("X-ray L_att", f"{p.xray_atten_nm:g} nm", "-", "na", "Henke value not available"))
+    # optical index at the probe wavelength
+    if p.experiment == "optical":
+        if ref and ref.get("n"):
+            lo, hi = ref["n"][0][0], ref["n"][0][-1]
+            if lo <= p.probe_wavelength_nm <= hi:
+                nr = float(np.interp(p.probe_wavelength_nm, *ref["n"]))
+                dev = p.sample_n / nr - 1
+                rows.append(("n at probe", f"{p.sample_n:g}", f"{nr:.3f} at {p.probe_wavelength_nm:g} nm",
+                             "ok" if abs(dev) <= 0.02 else "bad", f"{dev * 100:+.1f} % (tolerance ±2 %)"))
+            else:
+                rows.append(("n at probe", f"{p.sample_n:g}", f"table {lo}–{hi} nm", "na", "probe wavelength outside the table"))
+        elif ref and ref.get("note"):
+            rows.append(("n at probe", f"{p.sample_n:g}", "-", "bad", ref["note"]))
+        else:
+            rows.append(("n at probe", f"{p.sample_n:g}", "-", "na", "no literature value for this compound"))
+    if p.sample_thickness_nm <= 0:
+        rows.append(("thickness", f"{p.sample_thickness_nm:g} nm", "-", "bad", "must be > 0"))
+    return rows
+
+
+def sd_sample_factor(dk, La, d):
+    """Self-diffraction through a sample of thickness d (transmission, pump and SD attenuated with the
+    intensity attenuation length La). The SD field made at depth z goes as E_A² E_B* ∝ e^{-3z/2La} and
+    leaves through d - z, e^{-(d-z)/2La}, so
+        I_SD ∝ e^{-d/La} · |∫₀ᵈ e^{-z/La} e^{iΔk z} dz|²  =  e^{-d/La} · L_eff² · η(Δk).
+    Returned relative to its best value, 4/27 La² (d = La ln 3, Δk = 0): 1 = ideal membrane."""
+    eta, F0 = depth_factor(dk, La, d)
+    return float(math.exp(-d / La) * F0 ** 2 * eta / (4 / 27 * La ** 2))
+
+
 def depth_factor(dk, La, d):
     """Phase-matching factor of a TG whose amplitude decays as exp(-z/La) over the thickness d:
         η_rel = |∫₀ᵈ e^{-z/La} e^{iΔk z} dz|² / |∫₀ᵈ e^{-z/La} dz|²
@@ -216,7 +325,7 @@ def probe_curve(p: Params, Kx, Kz, phi_deg, chi_deg=None):
     k_d,∥ = k_p,∥ + m (Kx, 0), and the mismatch along the normal Δk_z = k_pz + m K_z − k_dz sets the
     efficiency through depth_factor() (TG amplitude ∝ exp(-z / X-ray attenuation length)).
     Returns dict order -> (eta_rel, external diffraction angle from the normal in deg, nan if trapped)."""
-    chi = math.radians(p.probe_azimuth_deg if chi_deg is None else chi_deg)
+    chi = math.radians(0.0 if chi_deg is None else chi_deg)
     phi = np.radians(np.asarray(phi_deg, float))
     k0 = 2 * math.pi / (p.probe_wavelength_nm * 1e-9)
     k = p.sample_n * k0
@@ -239,7 +348,7 @@ def probe_curve(p: Params, Kx, Kz, phi_deg, chi_deg=None):
 def bragg_angle_deg(p: Params, Ls, chi_deg=None):
     """External Bragg angle in the plane of incidence at azimuth χ: phase matching needs the probe's
     x component of k to be K/2, i.e. sin φ cos χ = λ_probe / (2 Λ). nan if not reachable."""
-    chi = math.radians(p.probe_azimuth_deg if chi_deg is None else chi_deg)
+    chi = math.radians(0.0 if chi_deg is None else chi_deg)
     s_ = p.probe_wavelength_nm * 1e-9 / (2 * Ls * max(abs(math.cos(chi)), 1e-12))
     return math.degrees(math.asin(s_)) if s_ < 1 else float("nan")
 
@@ -277,6 +386,41 @@ def probe_metrics(p: Params, Kx, Kz):
                 probe_regime="thin (Raman–Nath)" if Q < 1 else ("thick (Bragg)" if Q > 10 else "intermediate"))
 
 
+def tg_in_sample(res: "Result", n_periods=4, nx=241, nz=201) -> dict:
+    """Absorbed X-ray energy of the transient grating inside the sample (x along the surface, split
+    axis; z depth from the entrance face). Dose(x, z) = F/L_att · e^{-z/L_att} · (1 + V cos(K_x x + K_z z)),
+    F = peak fluence A+B, V = TG contrast (coherence and A/B imbalance included), K tilted by the
+    grating-vector tilt. Converted to eV/atom with the formula and density, and to a temperature jump
+    with the Dulong–Petit heat capacity 3 k_B per atom (an estimate; real C_p is lower at room temperature
+    for light atoms, so ΔT is a lower bound there)."""
+    p, m = res.p, res.metrics
+    La, d = p.xray_atten_nm, p.sample_thickness_nm
+    Ls = m["tg_surface_nm"]
+    Kx = 2 * math.pi / Ls
+    Kz = Kx * math.tan(m["tg_tilt_mrad"] * 1e-3)
+    V = float(m["tg_contrast"])
+    zmax = min(d, 5 * La)
+    x = np.linspace(0, n_periods * Ls, nx)
+    z = np.linspace(0, zmax, nz)
+    F = m["fluence_sum"] * 1e-3                                     # J/cm²
+    dose0 = F / (La * 1e-7)                                         # J/cm³ at the surface (mean)
+    D = dose0 * np.exp(-z[:, None] / La) * (1 + V * np.cos(Kx * x[None, :] + Kz * z[:, None]))
+    out = dict(x=x, z=z, dose=D, dose0=dose0, V=V, La=La, d=d, Ls=Ls, Kx=Kx, Kz=Kz,
+               absorbed=1 - math.exp(-d / La), transmitted=math.exp(-d / La),
+               L_eff=La * (1 - math.exp(-d / La)), ev_atom=None, dT=None)
+    try:
+        import periodictable as pt
+        f = pt.formula(p.sample_formula)
+        n_at = sum(f.atoms.values()) * p.sample_density / f.mass * 6.02214076e23     # atoms/cm³
+        ev = D / n_at / 1.602176634e-19
+        out.update(ev_atom=ev, ev_atom_peak=float(dose0 * (1 + V) / n_at / 1.602176634e-19),
+                   dT=ev * 1.602176634e-19 / (3 * 1.380649e-23), n_atoms_cm3=n_at)
+        out["dT_peak"] = out["ev_atom_peak"] * 1.602176634e-19 / (3 * 1.380649e-23)
+    except Exception:                                               # noqa: BLE001
+        pass
+    return out
+
+
 def _unit(v):
     v = np.asarray(v, float)
     return v / np.linalg.norm(v)
@@ -294,7 +438,7 @@ def probe_geometry(res: "Result") -> dict:
     nrm = np.array([math.sin(tilt), 0.0, math.cos(tilt)])          # sample normal
     e1 = np.array([math.cos(tilt), 0.0, -math.sin(tilt)])          # in-plane, along the split axis
     e2 = np.array([0.0, 1.0, 0.0])
-    phi, chi = math.radians(m["probe_angle_used_deg"]), math.radians(p.probe_azimuth_deg)
+    phi, chi = math.radians(m["probe_angle_used_deg"]), 0.0      # probe in the X-ray (split) plane
     # wavevector direction of the incoming probe: in-plane part along (cos χ, sin χ), towards +z
     d_in = _unit(math.sin(phi) * (math.cos(chi) * e1 + math.sin(chi) * e2) + math.cos(phi) * nrm)
     S = np.array([0.0, 0.0, z["sample"]])
@@ -321,9 +465,15 @@ def probe_geometry(res: "Result") -> dict:
     lo, hi = res.slit
     bl, bh = p.slit_blade_len_mm * 1e-3, p.slit_blade_h_mm * 1e-3 / 2
     w = p.probe_waist_um * 1e-6 / 2                # half width (FWHM / 2) of the probe
-    if abs(q[1]) - w < bh and ((lo - bl < q[0] + w and q[0] - w < lo) or (hi < q[0] + w and q[0] - w < hi + bl)):
+    wx = w / max(math.cos(phi), 1e-3)              # its half width across a plane z = const
+    edge = abs(lo if q[0] < 0 else hi)             # slit edge on the probe side
+    # slit distance at which the probe passes beyond the outer end of the blade
+    slit_min = (edge + bl + wx) / math.tan(phi) if phi > 1e-6 else float("inf")
+    if M[2] < z["slit"] and abs(q[1]) - w < bh and ((lo - bl < q[0] + wx and q[0] - wx < lo)
+                                                   or (hi < q[0] + wx and q[0] - wx < hi + bl)):
         obst.append(f"the incoming probe hits a slit blade ({(z['sample'] - z['slit']) * 1e3:.1f} mm before the "
-                    f"sample, at x = {q[0] * 1e3:+.2f} mm, y = {q[1] * 1e3:+.2f} mm)")
+                    f"sample, at x = {q[0] * 1e3:+.2f} mm): put the slit at least {slit_min * 1e3:.1f} mm before "
+                    f"the sample, or shorten the blades to {max(abs(q[0]) - edge - wx, 0) * 1e3:.1f} mm")
     # grating chip
     if M[2] < p.z_grating < S[2]:
         q = at_plane(S, d_in, p.z_grating)
@@ -353,7 +503,7 @@ def probe_geometry(res: "Result") -> dict:
         obst.append(f"the steering mirror ({p.probe_mirror_diam_mm:g} mm) would cut the X-ray beams "
                     f"({-clear * 1e3:.1f} mm overlap): move it further away or use a smaller mirror")
     return dict(mirror=M, mirror_normal=mn, feed=feed, d_in=d_in, d_tr=d_tr, d_df=d_df, S=S, nrm=nrm,
-                mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst,
+                mirror_aoi_deg=aoi, mirror_clear_mm=clear * 1e3, obstacles=obst, slit_min_mm=slit_min * 1e3,
                 mirror_xyz_mm=(M[0] * 1e3, M[1] * 1e3, M[2] * 1e3))
 
 
@@ -571,12 +721,20 @@ class Result:
     dbs: tuple = (0.0, 0.0)      # (lo, hi) of the direct-beam beamstop, m
     sd: dict = field(default_factory=dict)   # beams on the CCD: name -> (x, y)
     sd_slopes: tuple = (0.0, 0.0)            # mean slopes of A(-1), B(+1) at the sample
+    sd_extra: tuple = (0.0, 0.0)             # slope of SD_A minus slope of A(-1), same for B (exact)
 
 
 def simulate(p: Params, n_rays=None, full=True) -> Result:
     """Trace the beamline. full=False skips the detector/SD bookkeeping (faster scans)."""
-    R = Rays(p, n_rays)
     warn = []
+    if p.sample_auto_att:
+        La = henke_atten_nm(p.sample_formula, p.sample_density, p.wavelength_nm)
+        if np.isfinite(La):
+            p = p.copy(xray_atten_nm=round(La, 2))
+        else:
+            warn.append(f"no Henke attenuation length for '{p.sample_formula}' (formula invalid or periodictable "
+                        f"missing): using {p.xray_atten_nm:g} nm")
+    R = Rays(p, n_rays)
     if p.period_mode == "target":
         per_t = solve_period(p, p.tg_set_nm, R)
         if np.isfinite(per_t):
@@ -728,7 +886,7 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
     if p.experiment == "optical":
         m.update(probe_metrics(p, Kx, Kz))
         if p.probe_auto_bragg and not np.isfinite(m["probe_bragg_deg"]) and m["probe_ok"]:
-            warn.append(f"no Bragg angle at azimuth {p.probe_azimuth_deg:g}° (needs λ/(2Λ cos χ) < 1)")
+            warn.append("no Bragg angle for the optical probe (needs λ_probe/(2Λ) < 1)")
         if not m["probe_ok"]:
             warn.append(f"TG period {tg_period * 1e9:.0f} nm < λ_probe/2 = {p.probe_wavelength_nm / 2:g} nm: "
                         "the optical probe has no diffracted order")
@@ -816,6 +974,20 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
         m["tg_contrast"] = 0.0
     # relative SD figure of merit: diffraction efficiency ~ (modulation depth)^2, times F_A F_B (F_A+F_B)/2
     m["sd_fom"] = m["tg_contrast"] ** 2 * m["fluence_A"] * m["fluence_B"] * m["fluence_sum"] / 2
+    # the SD beams leave the sample at the exact angle sin = 2 sin a_A - sin a_B (the in-plane wavevector is
+    # conserved) and are not phase-matched along the normal: Δk_z = k (2 cos a_A - cos a_B - cos a_SD)
+    La, d = p.xray_atten_nm * 1e-9, p.sample_thickness_nm * 1e-9
+    sx = 2 * math.sin(bA) - math.sin(bB)
+    dkz = 2 * math.pi / lam0 * (2 * math.cos(bA) - math.cos(bB) - math.sqrt(max(1 - sx * sx, 0)))
+    m.update(sd_angle_mrad=math.asin(max(min(sx, 1), -1)) * 1e3, sd_dkz_per_um=dkz * 1e-6,
+             sd_transmission=math.exp(-d / La), sd_eta=float(depth_factor(dkz, La, d)[0]),
+             sd_sample_rel=sd_sample_factor(dkz, La, d), sd_best_thickness_nm=La * math.log(3) * 1e9)
+    m["sd_fom"] *= m["sd_sample_rel"]
+    if full and m["sd_sample_rel"] < 0.05:
+        warn.append(f"self-diffraction: {p.sample_thickness_nm:g} nm of {p.sample_formula} transmits "
+                    f"e^(−d/L_att) = {m['sd_transmission']:.2g} of the X-rays (L_att = {p.xray_atten_nm:g} nm), so the "
+                    f"SD beams do not reach the CCD; a membrane ≈ L_att·ln 3 = {m['sd_best_thickness_nm']:.0f} nm thick "
+                    "is best for SD in transmission")
 
     # optical probe: diffracted probe ~ (TG modulation x pump fluence)^2 x phase matching
     m["opt_fom"] = ((m["tg_contrast"] * m["fluence_sum"]) ** 2 * m.get("probe_eta_rel", 0.0)
@@ -827,7 +999,8 @@ def simulate(p: Params, n_rays=None, full=True) -> Result:
         g = probe_geometry(res)
         m.update(probe_mirror_clear_mm=g["mirror_clear_mm"], probe_mirror_aoi_deg=g["mirror_aoi_deg"],
                  probe_mirror_z=g["mirror"][2], probe_mirror_x_mm=g["mirror"][0] * 1e3,
-                 probe_mirror_y_mm=g["mirror"][1] * 1e3, probe_clashes=float(len(g["obstacles"])))
+                 probe_mirror_y_mm=g["mirror"][1] * 1e3, probe_clashes=float(len(g["obstacles"])),
+                 probe_slit_min_mm=g["slit_min_mm"])
         res.warnings.extend("probe: " + o for o in g["obstacles"])
     return res
 
@@ -837,8 +1010,15 @@ def _detector(res: Result, wA, wB, sA, sB):
     direct-beam beamstop (z = sample + dbs_after_sample_mm) and recorded on the CCD."""
     p, R, z_s, zb, zd = res.p, res.rays, res.z["sample"], res.z["dbs"], res.z["det"]
     res.sd_slopes = (sA, sB)
+    tilt = p.sample_tilt_mrad * 1e-3
+
+    def sd_extra(s1, s2):                       # slope of 2k1 - k2 minus slope of k1 (exact, in-plane k conserved)
+        a1, a2 = math.atan(s1) - tilt, math.atan(s2) - tilt
+        sx = max(min(2 * math.sin(a1) - math.sin(a2), 1.0), -1.0)
+        return math.tan(math.asin(sx) + tilt) - s1
+    res.sd_extra = (sd_extra(sA, sB), sd_extra(sB, sA))
     at_bs, out = {}, {}
-    for b, extra, nm in ((wA, sA - sB, "SD_A"), (wB, sB - sA, "SD_B")):
+    for b, extra, nm in ((wA, res.sd_extra[0], "SD_A"), (wB, res.sd_extra[1], "SD_B")):
         k = b.idx[b.slit_mask]
         xb, xd = R.s(zb, k, b.order), R.s(zd, k, b.order)
         at_bs[b.name], at_bs[nm] = xb, xb + extra * (zb - z_s)
@@ -902,7 +1082,7 @@ def sd_envelope(res: Result, nz=60, q=0.02):
     sA, sB = res.sd_slopes
     Z = np.linspace(z_s, zd, nz)[:, None]
     out = []
-    for b, k, extra in ((wA, kA, sA - sB), (wB, kB, sB - sA)):
+    for b, k, extra in ((wA, kA, res.sd_extra[0]), (wB, kB, res.sd_extra[1])):
         x = R.s(Z, k, b.order) + extra * (Z - z_s)
         lo, hi = np.quantile(x, [q, 1 - q], axis=1)
         out.append(("SD_" + b.beam, Z[:, 0], lo, hi))
@@ -1066,7 +1246,9 @@ SCAN_INFO = {
         "Gap between the edge of the direct-beam beamstop and the nearest self-diffracted beam (2k_A−k_B, "
         "2k_B−k_A) at the beamstop plane. > 0: the SD signal passes the beamstop and reaches the CCD."),
     "sd_fom": ("SD figure of merit", "rel.",
-        "(TG contrast)² × F_A × F_B × (F_A+F_B)/2, a relative measure of a 3rd-order self-diffraction signal."),
+        "(TG contrast)² × F_A × F_B × (F_A+F_B)/2 × sample factor, a relative measure of the 3rd-order "
+        "self-diffraction signal. Sample factor = e^(−d/L_att)·L_eff²·η(Δk_z) relative to its best value "
+        "(d = L_att ln 3, phase-matched): it accounts for X-ray absorption and the SD phase mismatch."),
     "pft_fs": ("Pulse-front tilt", "fs",
         "Delay across one 1st-order beam introduced by the grating: (illuminated lines) × λ / c."),
     "z_sample": ("Sample position", "m", "Sample z measured from the horizontal KB mirror."),
