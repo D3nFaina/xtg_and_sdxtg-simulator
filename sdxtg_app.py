@@ -440,11 +440,16 @@ with tab_3d:
     orders = c3.toggle("Other orders", value=True, key="v3d_orders")
     rays_on = c4.toggle("Ray cloud", value=False, key="v3d_rays")
     f3d = s3d.figure_3d(res, reg, float(ex), orders, rays_on)
+    # the saved camera belongs to one region and set of axes: a different scene starts from its default view
+    _xr = f3d.layout.scene.xaxis.range or (0, 0)
+    cam_key = f"v3_{reg}_{p.experiment}_{_xr[0]:.1f}_{_xr[1]:.1f}"
+    if reg == "sample" and p.experiment != "optical":
+        st.info("The optical probe is drawn only in the **X-ray pump · optical probe** experiment (sidebar).", icon="🔦")
     if ss.get("v3d_nav", True):
         if hasattr(st, "iframe"):                  # Streamlit >= 1.52
-            st.iframe(s3d.html_3d(f3d, reg, 740), height=750)
+            st.iframe(s3d.html_3d(f3d, cam_key, 740), height=750)
         else:
-            components.html(s3d.html_3d(f3d, reg, 740), height=750)
+            components.html(s3d.html_3d(f3d, cam_key, 740), height=750)
     else:
         st.plotly_chart(f3d, **WIDE)
     st.toggle("Zoom towards the cursor with Alt/⌥ + scroll", value=True, key="v3d_nav",
