@@ -432,8 +432,9 @@ tab_bl, tab_3d, tab_sz, tab_pr, tab_an, tab_tg, tab_sc, tab_wv, tab_md = st.tabs
 
 with tab_3d:
     c1, c2, c3, c4 = st.columns([1.4, 1.4, 1, 1])
-    reg = c1.radio("Region", ["full", "sample"], horizontal=True, key="v3d_region",
-                   format_func=lambda v: "whole beamline" if v == "full" else "around the sample (to scale)")
+    reg = c1.radio("Region", ["full", "layout", "sample"], horizontal=True, key="v3d_region",
+                   format_func=lambda v: {"full": "whole beamline", "layout": "grating → CCD (to scale)",
+                                          "sample": "pump–probe overlap (close-up, to scale)"}[v])
     ex = c2.select_slider("Transverse exaggeration (x, y)", [1, 2, 5, 10, 20, 50, 100, 200, 500],
                           value=100 if reg == "full" else 1, key=f"v3d_exag_{reg}")
     orders = c3.toggle("Other orders", value=True, key="v3d_orders")
@@ -522,25 +523,47 @@ def elements(fig, row, sc, ymax, full):
                   fillcolor="#1E3A5F", line=dict(color="#C9A227", width=1.5), row=row, col=1)
 
 
-def probe_lines(fig, row, sc, ymax):
-    """Optical probe in the split plane: steering mirror → sample, transmitted and diffracted probe."""
-    if p.experiment != "optical" or "probe_mirror_x_mm" not in m:
-        return
-    g = sim.probe_geometry(res)
-    S, L = g["S"], 2 * (z["det"] - z["sample"])
-    show = row == 1
+PROBE_ON = p.experiment == "optical" and "probe_mirror_x_mm" in m
+GEO = sim.probe_geometry(res) if PROBE_ON else None
 
-    def ln(A, B, color, name, width, dash=None):
-        fig.add_trace(go.Scatter(x=[A[2], B[2]], y=[A[0] * sc, B[0] * sc], mode="lines", name=name,
-                                 line=dict(color=color, width=width, dash=dash), legendgroup=name,
-                                 showlegend=show, hoverinfo="name"), row=row, col=1)
-    ln(g["mirror"], S, s3d.COL["probe"], f"optical probe {p.probe_wavelength_nm:g} nm", 3)
-    ln(S, S + L * g["d_tr"], s3d.COL["probe"], "transmitted probe", 1.5, "dash")
-    if g["d_df"] is not None:
-        ln(S, S + L * g["d_df"], s3d.COL["probe_d"], "diffracted probe (signal)", 3)
-    fig.add_annotation(x=z["sample"], y=-0.78 * ymax, xshift=-8, text=f"probe from the mirror at x = {m['probe_mirror_x_mm']:+.1f} mm, "
-                            f"z = {m['probe_mirror_z']:.4f} m ", showarrow=False, xanchor="right",
-                       font=dict(size=11, color=s3d.COL["probe"]), row=row, col=1)
+
+def probe_formula_md():
+    """Phase-matching (Bragg) angle of the optical probe from the pump wavelength and crossing angle."""
+    th2 = (m["angle_B_mrad"] - m["angle_A_mrad"]) / 2 * 1e-3
+    lp, lx = p.probe_wavelength_nm, p.wavelength_nm
+    sB = lp / lx * math.sin(th2)
+    txt = (f"**Probe phase matching.** The pumps cross at θ = {2 * th2 * 1e3:.3f} mrad, so "
+           f"Λ = λ_X / (2 sin(θ/2)) = {m['tg_surface_nm']:.1f} nm. The probe is Bragg-matched (in-plane wavevector "
+           f"of the probe changed by exactly ±K) when **sin φ_B = λ_probe / (2Λ) = (λ_probe/λ_X)·sin(θ/2)** = "
+           f"({lp:g} / {lx:g})·sin({th2 * 1e3:.3f} mrad) = {sB:.4f}")
+    if sB < 1:
+        txt += (f" → **φ_B = {math.degrees(math.asin(sB)):.2f}°** from the sample normal, in the horizontal plane; "
+                f"inside the sample (n = {p.sample_n:g}) φ_in = {math.degrees(math.asin(sB / p.sample_n)):.2f}°. "
+                f"The diffracted probe leaves at −φ_B. The probe in all drawings is set to "
+                f"{m['probe_angle_used_deg']:.2f}°" + (" (Bragg angle)." if p.probe_auto_bragg else " (set by hand)."))
+    else:
+        txt += " > 1: no phase-matched probe at this wavelength (needs Λ > λ_probe/2)."
+    return txt
+
+
+def probe_at(zpos):
+    """Optical probe beams crossing the plane z = zpos: (label, centre µm, FWHM across the plane µm, colour)."""
+    if not PROBE_ON:
+        return []
+    S, w = GEO["S"], p.probe_waist_um
+    if abs(zpos - S[2]) < 1e-9:
+        return [("optical probe (footprint)", S[0] * 1e6, w / GEO["d_in"][2], s3d.COL["probe"])]
+    if zpos < S[2]:
+        if zpos < GEO["mirror"][2]:
+            return []
+        d = GEO["d_in"]
+        return [("optical probe (incoming)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe"])]
+    out = [("transmitted probe", (S[0] + GEO["d_tr"][0] * (zpos - S[2]) / GEO["d_tr"][2]) * 1e6, w / GEO["d_tr"][2],
+            s3d.COL["probe"])]
+    if GEO["d_df"] is not None:
+        d = GEO["d_df"]
+        out.append(("diffracted probe (signal)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe_d"]))
+    return out
 
 
 with tab_bl:
@@ -578,8 +601,6 @@ with tab_bl:
     fig.update_xaxes(range=[x0, z["det"] + 0.02 * (z["det"] - x0)], title="z from HM [m]", row=2, col=1, **AX)
     fig.update_yaxes(range=[-ymax1, ymax1], title=f"{p.split_axis} [mm]", row=1, col=1, **AX)
     fig.update_yaxes(range=[-ymax2, ymax2], title=f"{p.split_axis} [µm]", row=2, col=1, **AX)
-    probe_lines(fig, 1, 1e3, ymax1)
-    probe_lines(fig, 2, 1e6, ymax2)
     fig.update_layout(height=860, **LAYOUT)
     fig.update_layout(margin=dict(l=60, r=20, t=80, b=45), legend=dict(y=1.06))
     for an in fig.layout.annotations[:2]:          # subplot titles: left-aligned, above the labels
@@ -591,6 +612,15 @@ with tab_bl:
                "inside it. Grey bands are the orders the slit has to remove. "
                "The faint red and blue after the direct-beam stop show where the blocked direct beams would go. "
                "Purple shows the self-diffracted signal travelling to the CCD.")
+    if PROBE_ON:
+        st.markdown(probe_formula_md())
+        st.plotly_chart(s3d.figure_pump_probe(res), key="pp_bl", **WIDE)
+        st.caption("Close-up at true scale (equal axes): the pumps A(−1) and B(+1) (FWHM bands) cross at only "
+                   f"±{abs(m['angle_A_mrad']):.2f} mrad, so they look parallel; the probe comes in at φ_B through the "
+                   "gap of the order-selecting slit and overlaps them on the sample; the diffracted probe (signal) "
+                   "leaves at −φ_B, the self-diffracted X-rays continue at ±1.5 θ. The long views above have "
+                   "stretched transverse axes, where a 26° beam cannot be drawn at its real angle, so the probe is "
+                   "shown here.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Beam size
@@ -641,30 +671,6 @@ with tab_sz:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Profiles
 # ─────────────────────────────────────────────────────────────────────────────
-PROBE_ON = p.experiment == "optical" and "probe_mirror_x_mm" in m
-GEO = sim.probe_geometry(res) if PROBE_ON else None
-
-
-def probe_at(zpos):
-    """Optical probe beams crossing the plane z = zpos: (label, centre µm, FWHM across the plane µm, colour)."""
-    if not PROBE_ON:
-        return []
-    S, w = GEO["S"], p.probe_waist_um
-    if abs(zpos - S[2]) < 1e-9:
-        return [("optical probe (footprint)", S[0] * 1e6, w / GEO["d_in"][2], s3d.COL["probe"])]
-    if zpos < S[2]:
-        if zpos < GEO["mirror"][2]:
-            return []
-        d = GEO["d_in"]
-        return [("optical probe (incoming)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe"])]
-    out = [("transmitted probe", (S[0] + GEO["d_tr"][0] * (zpos - S[2]) / GEO["d_tr"][2]) * 1e6, w / GEO["d_tr"][2],
-            s3d.COL["probe"])]
-    if GEO["d_df"] is not None:
-        d = GEO["d_df"]
-        out.append(("diffracted probe (signal)", (S[0] + d[0] * (zpos - S[2]) / d[2]) * 1e6, w / d[2], s3d.COL["probe_d"]))
-    return out
-
-
 def profile_fig(zpos, bins, masked, title, shade=None, shade_inside=False, sd=False, height=360):
     R = res.rays
     f = go.Figure()
@@ -925,9 +931,10 @@ with tab_an:
             else:
                 st.success("The probe path is clear: no slit blade, grating chip or beamstop in the way, and the "
                            "mirror clears the X-ray beams.", icon="✅")
+            st.markdown(probe_formula_md())
             c1, c2 = st.columns(2)
-            c1.plotly_chart(s3d.figure_probe_2d(res, "xz"), **WIDE)
-            c2.plotly_chart(s3d.figure_probe_2d(res, "yz"), **WIDE)
+            c1.plotly_chart(s3d.figure_pump_probe(res), key="pp_an", **WIDE)
+            c2.plotly_chart(s3d.figure_probe_2d(res, "xz"), **WIDE)
             # Bragg angle and acceptance vs TG period, for orientation
             tgs = np.geomspace(max(lam_p / 2 * 1.001, 5), max(lam_p * 20, m["tg_period_nm"] * 2), 300)
             fb = go.Figure(go.Scatter(x=tgs, y=np.degrees(np.arcsin(lam_p / (2 * tgs))), line=dict(color=C["SD"], width=2),

@@ -134,6 +134,12 @@ python sdxtg_app.py
   of the order-selecting slit. The app gives the fraction of the probe that passes and the largest slit → sample
   distance for it: ≈ 0.25 mm at Λ = 450 nm (400 nm probe at 26°, 50 µm FWHM); the default slit is 0.2 mm upstream.
   It also flags a probe footprint larger than the X-ray spot.
+- **Probe angle and overlap.** The probe is set to the phase-matching angle
+  sin φ_B = λ_probe/(2Λ) = (λ_probe/λ_X)·sin(θ/2), θ = pump crossing angle (e.g. 400 nm probe, Λ = 452 nm:
+  φ_B = 26.25°). A to-scale close-up (Beamline and Angles tabs, and the 3D "pump–probe overlap" region) shows the
+  pumps, the slit gap, the probe through the gap, its overlap with the pumps on the sample, the diffracted probe
+  at −φ_B and the SD beams. In the long views the transverse axes are stretched, so there the probe is drawn at
+  its true angle on screen rather than at its stretched lab position.
 - **🧊 3D view.** Each beam is a tube through the ellipses spanned by its x and y ray envelopes (2–98 %), plus the
   optics, beam stops, CCD, steering mirror and probe. Drag to rotate, scroll to zoom, Alt/⌥ + scroll to zoom towards the cursor; the view is kept between runs. Transverse axes are stretched by
   an adjustable factor; "around the sample" at ×1 is to scale. An optional ray cloud shows the individual rays.

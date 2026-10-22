@@ -127,6 +127,23 @@ def _disc(center, normal, radius, color, name, exag, n=40):
                      hoverinfo="name", flatshading=True)
 
 
+def _cyl(P0, P1, radius, color, name, exag, show=True, opacity=0.85, n=20):
+    """Cylinder (probe beam, FWHM diameter) from P0 to P1, lab (x, y, z) metres."""
+    P0, P1 = np.asarray(P0, float), np.asarray(P1, float)
+    ax_ = sim._unit(P1 - P0)
+    a = sim._unit(np.cross(ax_, [0, 1, 0]) if abs(ax_[1]) < 0.99 else np.cross(ax_, [1, 0, 0]))
+    b = np.cross(ax_, a)
+    th = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    ring = radius * (np.cos(th)[:, None] * a + np.sin(th)[:, None] * b)
+    pts = np.vstack([P0 + ring, P1 + ring])
+    i, j, k = [], [], []
+    for t in range(n):
+        p0, p1, q0, q1 = t, (t + 1) % n, t + n, (t + 1) % n + n
+        i += [p0, p1]; j += [p1, q1]; k += [q0, q0]
+    return go.Mesh3d(x=pts[:, 2] * 1e3, y=pts[:, 0] * 1e3 * exag, z=pts[:, 1] * 1e3 * exag, i=i, j=j, k=k,
+                     color=color, opacity=opacity, name=name, showlegend=show, hoverinfo="name", flatshading=False)
+
+
 def _line(P0, P1, color, name, exag, width=6, dash=None, show=True):
     return go.Scatter3d(x=[P0[2] * 1e3, P1[2] * 1e3], y=[P0[0] * 1e3 * exag, P1[0] * 1e3 * exag],
                         z=[P0[1] * 1e3 * exag, P1[1] * 1e3 * exag], mode="lines", name=name,
@@ -168,11 +185,15 @@ def _env(R, idx, order, zz, q=0.02, max_rays=3000, extra=None, z_ref=None):
 def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_rays=False, nz=48):
     p, R, z, m = res.p, res.rays, res.z, res.metrics
     full = region == "full"
+    close = region == "sample"                  # close-up of the pump-probe overlap, to scale
     D = max(p.beam_fwhm("x"), p.beam_fwhm("y")) * 1e-3
-    if exag is None:
+    if exag is None or close:
         exag = 100.0 if full else 1.0
+    W = max(2.5 * p.slit_upstream_mm * 1e-3, 3 * p.sample_thickness_nm * 1e-9, 0.4e-3)   # close-up half size
     if full:
         zlo, zhi = min(p.z_hm, p.z_vm) - 0.1, p.z_det + 0.07
+    elif close:
+        zlo, zhi = z["sample"] - W, z["sample"] + W
     else:
         zlo = z["sample"] - 0.03
         if p.experiment == "optical" and "probe_mirror_z" in m:
@@ -257,12 +278,17 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
                        0.35, exag, True))
     lo, hi = res.slit
     bl, bh = p.slit_blade_len_mm * 1e-3, p.slit_blade_h_mm * 1e-3 / 2
-    tr.append(_box(z["slit"] - th / 2, z["slit"] + th / 2, lo - bl, lo, -bh, bh, COL["el"], "slit blades", 0.85,
+    ss_, sth, sop, bop = 2.5e-3, th / 4, 0.45, 0.85
+    lo_out, hi_out = lo - bl, hi + bl
+    if close:                                   # clip the elements to the close-up window
+        bh, ss_ = min(bh, 0.9 * W), 0.9 * W
+        lo_out, hi_out = max(lo_out, -0.9 * W), min(hi_out, 0.9 * W)
+        sth, sop, bop = p.sample_thickness_nm * 1e-9 / 2, 0.2, 0.55
+    tr.append(_box(z["slit"] - th / 2, z["slit"] + th / 2, lo_out, lo, -bh, bh, COL["el"], "slit blades", bop,
                    exag, True))
-    tr.append(_box(z["slit"] - th / 2, z["slit"] + th / 2, hi, hi + bl, -bh, bh, COL["el"], "slit blades", 0.85,
+    tr.append(_box(z["slit"] - th / 2, z["slit"] + th / 2, hi, hi_out, -bh, bh, COL["el"], "slit blades", bop,
                    exag, False))
-    ss_ = 2.5e-3
-    tr.append(_box(z["sample"] - th / 4, z["sample"] + th / 4, -ss_, ss_, -ss_, ss_, COL["sample"], "sample", 0.45,
+    tr.append(_box(z["sample"] - sth, z["sample"] + sth, -ss_, ss_, -ss_, ss_, COL["sample"], "sample", sop,
                    exag, True))
     if res.dbs != (0.0, 0.0) and zlo <= z["dbs"] <= zhi:
         tr.append(_box(z["dbs"] - th, z["dbs"] + th, res.dbs[0], res.dbs[1], -Hy, Hy, COL["el"], "direct-beam stop",
@@ -271,17 +297,31 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         tr += _ccd(p.z_det, m.get("ccd_offset_used_mm", p.ccd_offset_mm) * 1e-3, p.ccd_width_mm * 1e-3 / 2, exag)
 
     # ── optical probe ───────────────────────────────────────────────────────
+    probe_full = None
     if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
         g = sim.probe_geometry(res)
-        Lout = max(0.03, 1.2 * p.probe_mirror_dist_mm * 1e-3)
-        tr.append(_disc(g["mirror"], g["mirror_normal"], p.probe_mirror_diam_mm * 1e-3 / 2, COL["probe"],
-                        "steering mirror", exag))
-        tr.append(_line(g["mirror"] - 0.04 * g["feed"], g["mirror"], COL["probe"], "probe (feed)", exag, 5, "dot",
-                        False))
-        tr.append(_line(g["mirror"], g["S"], COL["probe"], f"probe {p.probe_wavelength_nm:g} nm", exag, 7))
-        tr.append(_line(g["S"], g["S"] + Lout * g["d_tr"], COL["probe"], "transmitted probe", exag, 4, "dash"))
-        if g["d_df"] is not None:
-            tr.append(_line(g["S"], g["S"] + Lout * g["d_df"], COL["probe_d"], "diffracted probe (signal)", exag, 7))
+        rad = p.probe_waist_um * 1e-6 / 2
+        S = g["S"]
+        lab = f"probe {p.probe_wavelength_nm:g} nm at φ = {m['probe_angle_used_deg']:.2f}°"
+        if full:
+            probe_full = g                     # drawn after the axes are known, at its true angle on screen
+        elif close:
+            L = W * 1.6
+            tr.append(_cyl(S - L * g["d_in"], S, rad, COL["probe"], lab, exag))
+            tr.append(_cyl(S, S + L * g["d_tr"], rad, COL["probe"], "transmitted probe", exag, opacity=0.35))
+            if g["d_df"] is not None:
+                tr.append(_cyl(S, S + L * g["d_df"], rad, COL["probe_d"],
+                               f"diffracted probe (signal), {m['probe_diff_angle_deg']:.2f}°", exag))
+        else:
+            Lout = max(0.03, 1.2 * p.probe_mirror_dist_mm * 1e-3)
+            tr.append(_disc(g["mirror"], g["mirror_normal"], p.probe_mirror_diam_mm * 1e-3 / 2, COL["probe"],
+                            "steering mirror", exag))
+            tr.append(_line(g["mirror"] - 0.04 * g["feed"], g["mirror"], COL["probe"], "probe (feed)", exag, 5,
+                            "dot", False))
+            tr.append(_cyl(g["mirror"], S, rad, COL["probe"], lab, exag))
+            tr.append(_cyl(S, S + Lout * g["d_tr"], rad, COL["probe"], "transmitted probe", exag, opacity=0.35))
+            if g["d_df"] is not None:
+                tr.append(_cyl(S, S + Lout * g["d_df"], rad, COL["probe_d"], "diffracted probe (signal)", exag))
 
     # ── layout ──────────────────────────────────────────────────────────────
     fig = go.Figure(tr)
@@ -294,9 +334,30 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
                 if a_.size:
                     big = max(big, float(np.nanmax(a_)))
     big *= 1.05
+    rng_t = [-big, big] if full else ([-W * 1e3, W * 1e3] if close else None)
     if full:
         aspect = dict(x=3.2, y=1, z=1)
         mode = "manual"
+        if probe_full is not None:
+            # the axes are stretched, so a lab-frame line would look almost perpendicular to the beam: draw
+            # the probe so that on screen it makes its true angle φ with the beam axis (length 15 % of z)
+            g = probe_full
+            zr = (zhi - zlo) * 1e3
+            sz, sy = aspect["x"] / zr, aspect["y"] / (2 * big)       # screen units per mm on each axis
+            Lz = 0.22 * zr
+            zs_ = z["sample"] * 1e3
+            for d, col, nm, w_ in ((-g["d_in"], COL["probe"], f"probe {p.probe_wavelength_nm:g} nm, "
+                                    f"φ = {m['probe_angle_used_deg']:.2f}° (true angle on screen)", 7),
+                                   (g["d_tr"], COL["probe"], "transmitted probe", 3),
+                                   (g["d_df"], COL["probe_d"], "diffracted probe (signal)", 7)):
+                if d is None:
+                    continue
+                tz = d[2] / abs(d[2]) * Lz
+                ty = math.tan(math.atan2(d[0], abs(d[2]))) * abs(tz) * sz / sy
+                tr.append(go.Scatter3d(x=[zs_, zs_ + tz], y=[0, ty], z=[0, 0], mode="lines", name=nm,
+                                       line=dict(color=col, width=w_, dash="dash" if w_ == 3 else None),
+                                       hoverinfo="name"))
+            fig = go.Figure(tr)
     else:
         mode = "data"
         aspect = None
@@ -306,14 +367,14 @@ def figure_3d(res: sim.Result, region="full", exag=None, show_orders=True, show_
         scene=dict(
             xaxis=dict(title="z [mm]", backgroundcolor="#F6F8FB", gridcolor="#E6EAF0", range=[zlo * 1e3, zhi * 1e3]),
             yaxis=dict(title=f"x [mm] × {exag:g}" if exag != 1 else "x [mm]", backgroundcolor="#F6F8FB",
-                       range=[-big, big] if full else None,
-                       gridcolor="#E6EAF0"),
+                       range=rng_t, gridcolor="#E6EAF0"),
             zaxis=dict(title=f"y (vertical) [mm] × {exag:g}" if exag != 1 else "y (vertical) [mm]",
-                       backgroundcolor="#F6F8FB", range=[-big, big] if full else None,
+                       backgroundcolor="#F6F8FB", range=rng_t,
                        gridcolor="#E6EAF0"),
             aspectmode=mode, aspectratio=aspect,
-            camera=dict(eye=dict(x=-1.1, y=-1.6, z=0.9) if full else dict(x=-1.4, y=-1.3, z=0.8),
-                        up=dict(x=0, y=0, z=1))),
+            camera=dict(eye=dict(x=-1.1, y=-1.6, z=0.9) if full else
+                        (dict(x=-0.35, y=-0.45, z=2.0) if close else dict(x=-1.4, y=-1.3, z=0.8)),
+                        up=dict(x=1, y=0, z=0) if close else dict(x=0, y=0, z=1))),
         uirevision=f"3d-{region}")
     return fig
 
@@ -457,3 +518,80 @@ def html_3d(fig, region="full", height=740):
             f"<script>{_PLOTLY_JS}</script></head><body><div id='sdx3d' style='width:100%;height:{height - 10}px'></div>"
             f"<script>var FIG = {fig.to_json()}; var CONFIG = {json.dumps(cfg)}; var REGION = {json.dumps(region)};"
             + _NAV_JS + "</script></body></html>")
+
+
+def figure_pump_probe(res: sim.Result):
+    """Close-up of the pump-probe overlap in the split (horizontal) plane, to scale (equal axes, µm):
+    A(-1), B(+1) and the SD beams from the rays, the slit blades with their gap, the sample, and the
+    optical probe (FWHM band) arriving through the gap at its phase-matched angle, with the transmitted
+    and diffracted probe."""
+    p, R, z, m = res.p, res.rays, res.z, res.metrics
+    zs = z["sample"]
+    W = max(2.0 * p.slit_upstream_mm * 1e-3, 3 * p.sample_thickness_nm * 1e-9, 0.3e-3)
+    zz = np.linspace(zs - W, zs + W, 161)
+    f = go.Figure()
+    u = lambda v: np.asarray(v) * 1e6
+
+    def band(zv, lo, hi, color, name, op=0.5, show=True, dash=None):
+        f.add_trace(go.Scatter(x=u(np.r_[zv, zv[::-1]] - zs), y=u(np.r_[lo, hi[::-1]]), fill="toself",
+                               line=dict(width=1, color=color, dash=dash), fillcolor=color, opacity=op,
+                               name=name, showlegend=show, hoverinfo="name"))
+    for b in res.bundles:
+        if not b.wanted:
+            continue
+        k = b.idx[b.slit_mask]
+        if len(k) < 5:
+            continue
+        x = R.s(zz[:, None], k, b.order)
+        lo, hi = np.quantile(x, [0.12, 0.88], axis=1)         # ≈ FWHM band of a Gaussian
+        band(zz, lo, hi, COL[b.beam], f"X-ray pump {b.name}", 0.45)
+        if res.sd_slopes != (0.0, 0.0):
+            e = res.sd_extra[0] if b.beam == "A" else res.sd_extra[1]
+            z2 = zz[zz >= zs]
+            x2 = R.s(z2[:, None], k, b.order) + e * (z2[:, None] - zs)
+            lo2, hi2 = np.quantile(x2, [0.12, 0.88], axis=1)
+            band(z2, lo2, hi2, COL["SD"], "self-diffracted X-rays", 0.45, show=b.beam == "A")
+    # slit blades
+    lo, hi = res.slit
+    zl = z["slit"]
+    for a0, a1, sh in ((-1, lo, True), (hi, 1, False)):
+        a0_, a1_ = (max(a0, -W), a1) if a0 == -1 else (a0, min(a1, W))
+        f.add_trace(go.Scatter(x=u(np.array([zl - 8e-6, zl + 8e-6, zl + 8e-6, zl - 8e-6, zl - 8e-6]) - zs),
+                               y=u([a0_, a0_, a1_, a1_, a0_]), fill="toself", fillcolor=COL["el"],
+                               line=dict(color=COL["el"]), name="slit blades", showlegend=sh, hoverinfo="name"))
+    # sample (true thickness)
+    d = p.sample_thickness_nm * 1e-9
+    f.add_trace(go.Scatter(x=u(np.array([0, d, d, 0, 0])), y=u([-W, -W, W, W, -W]), fill="toself",
+                           fillcolor=COL["sample"], opacity=0.35, line=dict(color=COL["sample"], width=1),
+                           name=f"sample, {p.sample_formula} {d * 1e6:g} µm", hoverinfo="name"))
+    if p.experiment == "optical" and np.isfinite(m.get("probe_angle_used_deg", np.nan)):
+        g = sim.probe_geometry(res)
+        S, hw = g["S"], p.probe_waist_um * 1e-6 / 2
+
+        def pband(dv, z0, z1, color, name, op, dash=None):
+            zv = np.linspace(z0, z1, 60)
+            xc = S[0] + dv[0] / dv[2] * (zv - zs)
+            wx = hw / abs(dv[2])                                   # half width across z = const
+            band(zv, xc - wx, xc + wx, color, name, op, dash=dash)
+        phi = m["probe_angle_used_deg"]
+        pband(g["d_in"], zs - W, zs, COL["probe"], f"optical probe {p.probe_wavelength_nm:g} nm, φ = {phi:.2f}°", 0.45)
+        pband(g["d_tr"], zs, zs + W, COL["probe"], "transmitted probe", 0.18, dash="dot")
+        if g["d_df"] is not None:
+            pband(g["d_df"], zs, zs + W, COL["probe_d"], f"diffracted probe (signal), {m['probe_diff_angle_deg']:.2f}°", 0.45)
+        # angle mark against the sample normal
+        r_ = 0.55 * W
+        ang = np.radians(np.linspace(0, abs(phi), 30))
+        sgn = -np.sign(g["d_in"][0]) if g["d_in"][0] else 1
+        f.add_trace(go.Scatter(x=u(-r_ * np.cos(ang)), y=u(sgn * r_ * np.sin(ang)), mode="lines",
+                               line=dict(color=COL["probe"], width=1.5), showlegend=False, hoverinfo="skip"))
+        f.add_annotation(x=u(-r_ * 1.05), y=u(sgn * r_ * 0.35), text=f"φ_B = {phi:.2f}°", showarrow=False,
+                         xanchor="right", font=dict(color=COL["probe"], size=12))
+    f.add_shape(type="line", x0=-u(W), x1=u(W), y0=0, y1=0, line=dict(color="#94A3B8", dash="dot", width=1))
+    f.update_layout(height=520, template="plotly_white", margin=dict(l=60, r=15, t=45, b=45),
+                    legend=dict(orientation="v", x=1.01, y=1, font=dict(size=11)),
+                    title=dict(text="Pump–probe overlap at the sample, top view (horizontal plane), to scale",
+                               font=dict(size=13)))
+    f.update_xaxes(title="z − z_sample [µm]  (beam direction)", range=[-u(W), u(W)], zeroline=False)
+    f.update_yaxes(title=f"{p.split_axis} [µm]", range=[-u(W) * 0.75, u(W) * 0.75], scaleanchor="x", scaleratio=1,
+                   zeroline=False)
+    return f
